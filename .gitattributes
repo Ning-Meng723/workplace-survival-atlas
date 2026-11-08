@@ -1,0 +1,11 @@
+# 统一换行符：源码一律以 LF 入库与检出，避免 Windows/macOS 克隆后出现「整库改动」
+* text=auto eol=lf
+
+# 明确二进制类型（本项目目前无二进制资产，预留）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary

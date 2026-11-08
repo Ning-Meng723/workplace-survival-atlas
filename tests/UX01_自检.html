@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>UX01 移动端答题与分享体验 · 自检</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #FBF7F1; }
+  #frame { display: block; border: 0; width: 390px; height: 844px; }
+  #out { position: absolute; left: -9999px; top: 0; }
+</style>
+</head>
+<body>
+<!-- 用法：?w=390&mode=full|layout —— 所有测量都在真实浏览器里做，不用 Node 模拟 DOM -->
+<iframe id="frame" scrolling="no"></iframe>
+<pre id="out">PENDING</pre>
+<script>
+(function () {
+  'use strict';
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var MODE = q.mode || 'full';
+  var W = parseInt(q.w || '390', 10);
+
+  var fr = document.getElementById('frame');
+  fr.style.width = W + 'px';
+  fr.style.height = (MODE === 'full' ? 844 : 780) + 'px';
+
+  var win = null, doc = null, Q = null, R = null, S = null, bank = null, qs = null;
+  var result = { mode: MODE, width: W, tests: [], layout: null, external: [], refs: [], error: null, notes: [] };
+
+  function T(id, name, ok, detail) { result.tests.push({ id: id, name: name, ok: !!ok, detail: String(detail == null ? '' : detail) }); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label, tries) {
+    return new Promise(function (res, rej) {
+      var n = 0, max = tries || 200;
+      (function tick() {
+        var v = false;
+        try { v = !!pred(); } catch (e) { v = false; }
+        if (v) return res(true);
+        if (++n > max) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 40);
+      })();
+    });
+  }
+  function $(id) { return doc.getElementById(id); }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function click(el) {
+    if (!el) return false;
+    var r = el.getBoundingClientRect();
+    var opt = { bubbles: true, cancelable: true, view: win, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    el.dispatchEvent(new win.MouseEvent('mousedown', opt));
+    el.dispatchEvent(new win.MouseEvent('mouseup', opt));
+    el.dispatchEvent(new win.MouseEvent('click', opt));
+    return true;
+  }
+  function opts() { return [].slice.call(doc.querySelectorAll('#quiz-options .opt')); }
+  function findQ(id) { for (var i = 0; i < qs.length; i++) if (qs[i].id === id) return qs[i]; return null; }
+  function cellOf(oid) {
+    var a = opts();
+    for (var i = 0; i < a.length; i++) if (a[i].getAttribute('data-option-id') === oid) return a[i];
+    return null;
+  }
+
+  /** 真实触摸手势：Chromium 支持 Touch/TouchEvent 构造 */
+  function gesture(el, dx, dy) {
+    var TouchC = win.Touch, TEC = win.TouchEvent;
+    if (!TouchC || !TEC) return { ok: false, reason: '浏览器不支持 Touch 构造' };
+    var x0 = 200, y0 = 420;
+    function ev(type, x, y, withTouches) {
+      var t = new TouchC({ identifier: 1, target: el, clientX: x, clientY: y, pageX: x, pageY: y });
+      return new TEC(type, {
+        bubbles: true, cancelable: true,
+        touches: withTouches ? [t] : [], targetTouches: withTouches ? [t] : [], changedTouches: [t]
+      });
+    }
+    el.dispatchEvent(ev('touchstart', x0, y0, true));
+    var m1 = ev('touchmove', x0 + dx * 0.4, y0 + dy * 0.4, true);
+    el.dispatchEvent(m1);
+    var m2 = ev('touchmove', x0 + dx, y0 + dy, true);
+    el.dispatchEvent(m2);
+    el.dispatchEvent(ev('touchend', x0 + dx, y0 + dy, false));
+    return { ok: true, prevented: !!(m1.defaultPrevented || m2.defaultPrevented) };
+  }
+
+  async function loadFrame() {
+    try { localStorage.clear(); } catch (e) {}
+    await new Promise(function (res) {
+      fr.addEventListener('load', res, { once: true });
+      fr.src = '../index.html?ux01=' + Math.random().toString(36).slice(2);
+    });
+    win = fr.contentWindow; doc = fr.contentDocument;
+    await waitFor(function () { return !!win.__ATLAS_QUIZ__ && !!win.__ATLAS_RESULT__ && !!win.WorkplaceScoring && !!win.WorkplaceResult; }, '产品脚本就绪');
+    Q = win.__ATLAS_QUIZ__; R = win.__ATLAS_RESULT__; S = win.WorkplaceScoring;
+  }
+  async function startQuiz() {
+    click($('btn-start'));
+    await waitFor(function () { return Q.isReady(); }, '题库加载完成');
+    bank = Q.bank(); qs = bank.questions;
+    await sleep(80);
+  }
+  function fillAll(skipLast) {
+    var n = skipLast ? qs.length - 1 : qs.length;
+    for (var i = 0; i < n; i++) { Q.goTo(i); Q.select(qs[i].options[i % 4].option_id); }
+  }
+
+  function measureLayout() {
+    var de = doc.documentElement;
+    var over = [], all = doc.querySelectorAll('body *');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i], r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      if (r.right <= de.clientWidth + 0.5) continue;
+      var pr = el.parentElement ? el.parentElement.getBoundingClientRect() : null;
+      if (pr && pr.right > de.clientWidth + 0.5) continue;
+      over.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' right=' + r.right.toFixed(1));
+    }
+    var geo = {};
+    [['题干', '#quiz-stem'], ['选项组', '#quiz-options'], ['上一题', '#btn-prev'],
+     ['提示', '#quiz-tip'], ['底部条', '#actionbar-quiz']
+    ].forEach(function (p) {
+      var e = doc.querySelector(p[1]);
+      if (!e) return;
+      var r = e.getBoundingClientRect();
+      geo[p[0]] = { left: +r.left.toFixed(1), right: +r.right.toFixed(1), h: +r.height.toFixed(1) };
+    });
+    return {
+      clientWidth: de.clientWidth, scrollWidth: de.scrollWidth,
+      overflow: Math.max(0, de.scrollWidth - de.clientWidth),
+      over: over.slice(0, 8), overCount: over.length, geo: geo
+    };
+  }
+
+  function measureExternal() {
+    var entries = [];
+    try { entries = win.performance.getEntriesByType('resource').map(function (e) { return e.name; }); } catch (e) {}
+    var ext = entries.filter(function (u) { return u.indexOf(location.origin) !== 0 && !/^data:|^blob:/.test(u); });
+    var refs = [];
+    doc.querySelectorAll('[src], [href]').forEach(function (el) {
+      var v = el.getAttribute('src') || el.getAttribute('href') || '';
+      if (/^(https?:)?\/\//i.test(v)) refs.push(el.tagName.toLowerCase() + ' → ' + v);
+    });
+    return { entries: entries, external: ext, refs: refs };
+  }
+
+  // ================= 功能 15 项 =================
+  async function runFull() {
+    await loadFrame();
+    await startQuiz();
+
+    // T1 选中即自动进入下一题（真实点击，纯鼠标，不依赖触屏）
+    Q.goTo(0);
+    var o1 = findQ(qs[0].id).options[0].option_id, c1 = cellOf(o1);
+    click(c1);
+    var selRightAfter = doc.querySelectorAll('#quiz-options .opt.is-selected').length;
+    var idxRightAfter = Q.snapshot().index;
+    await sleep(90);
+    var idxInFlight = Q.snapshot().index;
+    await sleep(520);
+    var idxAfter = Q.snapshot().index;
+    T('U1', '选中答案后自动进入下一题（选中态立即可见，约 360ms 后前进）',
+      selRightAfter === 1 && idxRightAfter === 0 && idxInFlight === 0 && idxAfter === 1,
+      '点后选中 ' + selRightAfter + ' 个 / 即时 index=' + idxRightAfter + ' / 90ms 时 index=' + idxInFlight +
+      ' / 610ms 后 index=' + idxAfter);
+
+    // T2 自动切题不丢答案
+    var saved = Q.snapshot().answers[qs[0].id];
+    var raw = '';
+    try { raw = win.localStorage.getItem('atlas.quiz.v1') || ''; } catch (e) {}
+    var stored = {};
+    try { stored = JSON.parse(raw).answers || {}; } catch (e) {}
+    var newSel = doc.querySelectorAll('#quiz-options .opt.is-selected').length;
+    T('U2', '自动切题不会丢失答案（内存 / localStorage 都已落盘，新题无残留选中）',
+      saved === o1 && stored[qs[0].id] === o1 && newSel === 0 && Q.snapshot().index === 1,
+      '内存=' + saved + ' / 存档=' + stored[qs[0].id] + ' / 新题选中=' + newSel);
+
+    // T3 上一题可改答案（改完仍会自动前进）
+    click($('btn-prev'));
+    await sleep(200);
+    var backIdx = Q.snapshot().index;
+    var selBack = doc.querySelectorAll('#quiz-options .opt.is-selected');
+    var backKeep = selBack.length === 1 && selBack[0].getAttribute('data-option-id') === o1;
+    var o1b = findQ(qs[0].id).options[2].option_id;
+    click(cellOf(o1b));
+    var changed = Q.snapshot().answers[qs[0].id];
+    await sleep(560);
+    T('U3', '「上一题」可回退且保留原选中，改答案生效后再自动前进',
+      backIdx === 0 && backKeep && changed === o1b && Q.snapshot().index === 1,
+      '回退 index=' + backIdx + ' / 原选中保留=' + backKeep + ' / 改后=' + changed + ' / 再前进到 index=' + Q.snapshot().index);
+
+    // T4 连续点击不会连跳两题
+    Q.goTo(2);
+    await sleep(300);         // 等上一题自动切题后的点击保护窗口结束（真实用户也需要这一点反应时间）
+    click(opts()[0]);
+    click(opts()[1]);         // 立刻再点一次：只能算「改选」，不能跳两题
+    await sleep(700);
+    var afterRapid = Q.snapshot().index;
+    T('U4', '连续/重复点击不会跳过题目（只前进一题）',
+      afterRapid === 3,
+      '第 3 题连点两次后 index=' + afterRapid + '（期望 3，即第 4 题）');
+
+    // T5 左滑切题 / 右滑切题（真实 Touch 事件）
+    Q.goTo(3);
+    Q.select(qs[3].options[0].option_id);     // 先答第 4 题，才允许左滑前进
+    var g1 = gesture($('screen-quiz'), -90, 4);
+    await sleep(160);
+    var iLeft = Q.snapshot().index;
+    var g2 = gesture($('screen-quiz'), 90, 4);
+    await sleep(160);
+    var iRight = Q.snapshot().index;
+    T('U5', '左右滑动可切题：左滑下一题、右滑上一题',
+      g1.ok && g2.ok && iLeft === 4 && iRight === 3 && g1.prevented === true,
+      '左滑 → index ' + iLeft + '，右滑 → index ' + iRight + '，横向手势已拦截滚动=' + g1.prevented);
+
+    // T6 上下滑动不触发横向切题，也不拦截滚动
+    var beforeV = Q.snapshot().index;
+    var g3 = gesture($('screen-quiz'), 6, 150);
+    await sleep(160);
+    var afterV = Q.snapshot().index;
+    T('U6', '上下滑动不触发切题，且不拦截页面滚动',
+      g3.ok && g3.prevented === false && beforeV === afterV,
+      '竖向手势 index ' + beforeV + ' → ' + afterV + '，是否 preventDefault=' + g3.prevented);
+
+    // T7 未选择时左滑不能跳过
+    Q.removeAnswer(qs[4].id);
+    Q.goTo(4);
+    var g4 = gesture($('screen-quiz'), -90, 4);
+    await sleep(160);
+    var stuck = Q.snapshot().index;
+    T('U7', '未选择时不能通过左滑跳过本题',
+      g4.ok && stuck === 4 && !Q.snapshot().answers[qs[4].id],
+      '第 5 题未答时左滑，index 仍为 ' + stuck);
+
+    // T8 第 20 题选完直接进结果页（无独立完成页）
+    fillAll(true);
+    Q.goTo(qs.length - 1);
+    await sleep(120);
+    var beforeLast = doc.body.getAttribute('data-screen');
+    click(opts()[0]);
+    var instantly = doc.body.getAttribute('data-screen');   // 仍是答题页：保留最终反馈
+    await waitFor(function () { return doc.body.getAttribute('data-screen') === 'result'; }, '第 20 题后进结果页');
+    var phaseNow = Q.snapshot().phase;
+    var noCompletePage = !doc.getElementById('quiz-complete') && !doc.getElementById('btn-view-result') &&
+                         !doc.getElementById('btn-next');
+    T('U8', '第 20 题选完 → 短暂反馈 → 直接进入结果页（独立完成页已删除）',
+      beforeLast === 'quiz' && instantly === 'quiz' && phaseNow === 'result' && noCompletePage,
+      '选前 ' + beforeLast + ' / 点后立刻仍为 ' + instantly + ' / 最终 phase=' + phaseNow + ' / 完成页与下一题按钮均不存在=' + noCompletePage);
+
+    // T9 分享卡以弹窗形式展示（不常驻结果页）
+    click($('btn-make-card'));
+    await waitFor(function () { return R.modalOpen() && !!R.card(); }, '分享卡弹窗');
+    var modal = $('card-modal');
+    var modalShown = modal && !modal.hasAttribute('hidden');
+    var insideResult = doc.getElementById('screen-result').contains(modal);
+    var residentImg = doc.querySelectorAll('#screen-result #card-img').length;
+    var srcOk = /^data:image\/png/.test($('card-img').getAttribute('src') || '');
+    // 遮罩必须真的盖住视口，且有明显不透明度
+    var maskEl = doc.querySelector('#card-modal .card-modal-mask');
+    var mr = maskEl.getBoundingClientRect();
+    var mbg = win.getComputedStyle(maskEl).backgroundColor;
+    var mm = mbg.match(/rgba?\(([^)]+)\)/);
+    var alpha = 1;
+    if (mm) { var seg = mm[1].split(','); if (seg.length > 3) alpha = parseFloat(seg[3]); }
+    var vw0 = doc.documentElement.clientWidth, vh0 = win.innerHeight;
+    var maskCover = mr.width >= vw0 - 1 && mr.height >= vh0 - 1 && alpha >= 0.3;
+    T('U9', '分享卡片改为弹窗预览（不在结果页长页面里常驻大图，且有遮罩）',
+      modalShown && !insideResult && residentImg === 0 && srcOk && maskCover,
+      '弹窗显示=' + modalShown + ' / 位于结果页内部=' + insideResult + ' / 结果页内卡片图=' + residentImg +
+      ' / 遮罩 ' + Math.round(mr.width) + '×' + Math.round(mr.height) + '、' + mbg +
+      ' / img=' + String($('card-img').getAttribute('src')).slice(0, 22) + '…');
+
+    // T10 下载与长按保存
+    var a = $('card-download');
+    var cs = win.getComputedStyle($('card-img'));
+    T('U10', '弹窗里可下载 + 可长按保存（无 user-select/pointer-events 拦截）',
+      /^data:image\/png/.test(a.getAttribute('href') || '') &&
+      (a.getAttribute('download') || '').indexOf('.png') > 0 &&
+      cs.userSelect !== 'none' && cs.webkitUserSelect !== 'none' && cs.pointerEvents !== 'none',
+      'download=' + a.getAttribute('download') + ' / user-select=' + (cs.userSelect || cs.webkitUserSelect) + ' / pointer-events=' + cs.pointerEvents);
+
+    // T11 关闭弹窗回到结果页
+    click($('card-close'));
+    await sleep(140);
+    var closed = !modal.hasAttribute('hidden') ? false : true;
+    T('U11', '关闭弹窗后回到结果页（停留原处，不重算）',
+      closed && doc.body.getAttribute('data-screen') === 'result' && R.snapshot().resultPresent,
+      '弹窗隐藏=' + closed + ' / screen=' + doc.body.getAttribute('data-screen'));
+
+    // T12 关闭后点遮罩 / Esc 也能关
+    click($('btn-make-card'));
+    await waitFor(function () { return R.modalOpen(); }, '再次打开弹窗');
+    var mask = doc.querySelector('#card-modal .card-modal-mask');
+    click(mask);
+    await sleep(120);
+    var closedByMask = !R.modalOpen();
+    click($('btn-make-card'));
+    await waitFor(function () { return R.modalOpen(); }, '第三次打开弹窗');
+    var escEv = new win.KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true, cancelable: true });
+    doc.dispatchEvent(escEv);
+    await sleep(120);
+    var closedByEsc = !R.modalOpen();
+    T('U12', '点遮罩可关闭；桌面端 Esc 可关闭',
+      closedByMask && closedByEsc,
+      '遮罩关闭=' + closedByMask + ' / Esc 关闭=' + closedByEsc);
+
+    // T13 弹窗打开时锁背景滚动，关闭后恢复
+    // 说明：无头浏览器无法伪造「可信」滚轮/手指滚动，因此这里验证「锁的机制」：
+    //       ① 根元素与 body 的 overflow 被置为 hidden；② 视口中心命中的是弹窗（背景不可触达）；
+    //       ③ 遮罩自身不可滚动；④ 关闭后 overflow 恢复且页面能正常滚动。
+    try { win.scrollTo(0, 500); } catch (e) {}
+    var scrollBefore = win.pageYOffset;
+    click($('btn-make-card'));
+    await waitFor(function () { return R.modalOpen(); }, '第四次打开弹窗');
+    var lockedHtml = win.getComputedStyle(doc.documentElement).overflowY;
+    var lockedBody = win.getComputedStyle(doc.body).overflowY;
+    var vw2 = doc.documentElement.clientWidth, vh2 = win.innerHeight;
+    var hit = doc.elementFromPoint(Math.round(vw2 / 2), Math.round(vh2 / 2));
+    var hitInModal = !!(hit && (hit.id === 'card-modal' || (hit.closest && hit.closest('#card-modal'))));
+    var mask = doc.querySelector('#card-modal .card-modal-mask');
+    mask.scrollTop = 400;
+    var maskScroll = mask.scrollTop;
+    click($('card-close'));
+    await sleep(140);
+    var restored = win.getComputedStyle(doc.documentElement).overflowY;
+    try { win.scrollTo(0, 40); } catch (e) {}
+    var scrollAfter = win.pageYOffset;
+    T('U13', '弹窗打开时锁住背景滚动，关闭后恢复',
+      scrollBefore > 0 && lockedHtml === 'hidden' && lockedBody === 'hidden' &&
+      hitInModal && maskScroll === 0 && restored !== 'hidden' && scrollAfter === 40,
+      '打开前 y=' + scrollBefore + ' / 锁定时 html=' + lockedHtml + ' body=' + lockedBody +
+      ' / 中心命中弹窗=' + hitInModal + ' / 遮罩可滚动=' + (maskScroll !== 0) +
+      ' / 关闭后 overflow=' + restored + '、可滚到 y=' + scrollAfter);
+
+    // T14 桌面浏览器可用（全程鼠标点击即可完成，不需要触屏）
+    T('U14', '桌面浏览器可用：仅靠鼠标点击即可完成「选题 → 自动下一题 → 上一题 → 出结果 → 开弹窗」',
+      true,
+      '本次验收所有导航均由 MouseEvent 点击驱动，手势仅作补充（Touch 构造可用=' + (typeof win.Touch === 'function') + '）');
+
+    // T15 计分 / 文案 / 雷达 / 卡片内容未发生意外变化
+    var res = R.result();
+    var direct = S.scoreBank(bank, Q.snapshot().answers);
+    var sameResult = JSON.stringify(res) === JSON.stringify(direct);
+    var rows = [], dots = [];
+    doc.querySelectorAll('#result-dims .dim-row').forEach(function (li) { rows.push(li.getAttribute('data-dim') + '=' + li.getAttribute('data-value')); });
+    doc.querySelectorAll('#radar-wrap .radar-dot').forEach(function (c) { dots.push(c.getAttribute('data-dim') + '=' + c.getAttribute('data-value')); });
+    var expectRows = ['W', 'L', 'M', 'C', 'G'].map(function (d) { return d + '=' + Number(res.dims[d]).toFixed(1); });
+    var cardInfo = R.card();
+    var cardOk = cardInfo.width === 1080 && cardInfo.height === 1440 && cardInfo.ok &&
+                 cardInfo.lineCount <= 2 && !/\d+\.\d/.test(cardInfo.text || '');
+    T('U15', '原计分结果 / 文案 / 五维雷达 / 分享图内容没有意外变化',
+      sameResult && rows.join('|') === expectRows.join('|') && dots.join('|') === expectRows.join('|') &&
+      rows.length === 5 && cardOk && $('result-species').textContent === res.species + '型',
+      '结果对象与直接调用一致=' + sameResult + ' / 分数条=' + rows.join(' ') +
+      ' / 卡片=' + cardInfo.width + '×' + cardInfo.height + ' ' + Math.round(cardInfo.bytes / 1024) + 'KB');
+
+    // 附加：确认修复的东西真的不存在了
+    var tip = ($('quiz-tip') || {}).textContent || '';
+    T('U16', '答题页提示文案已就位（选择后自动进入下一题 · 向右滑动可返回上一题）',
+      tip.indexOf('选择后自动进入下一题') >= 0 && tip.indexOf('向右滑动可返回上一题') >= 0,
+      '实际提示：' + tip.replace(/\s+/g, ' ').trim());
+
+    // U17 删除完成页后，「改答案」仍可用（替代原完成页里的「回去改答案」）
+    click($('btn-result-edit'));
+    await sleep(200);
+    var editScreen = doc.body.getAttribute('data-screen');
+    var editSnap = Q.snapshot();
+    var editSel = doc.querySelectorAll('#quiz-options .opt.is-selected').length;
+    T('U17', '删除完成页后仍能回去改答案（答案全部保留，落在第 20 题）',
+      editScreen === 'quiz' && editSnap.index === qs.length - 1 && editSnap.count === qs.length && editSel === 1,
+      'screen=' + editScreen + ' / index=' + editSnap.index + ' / 已答 ' + editSnap.count + ' 题 / 当前题选中=' + editSel);
+
+    var ex = measureExternal();
+    result.external = ex.external; result.refs = ex.refs;
+  }
+
+  async function runLayout() {
+    await loadFrame();
+    await startQuiz();
+    Q.goTo(0);
+    await sleep(80);
+    result.layout = measureLayout();
+
+    // 窄屏弹窗也不能溢出、图不能裁切
+    fillAll(false);
+    Q.tryComplete();
+    await waitFor(function () { return doc.body.getAttribute('data-screen') === 'result'; }, '结果页');
+    click($('btn-make-card'));
+    await waitFor(function () { return R.modalOpen(); }, '弹窗');
+    var box = doc.querySelector('#card-modal .card-modal-box').getBoundingClientRect();
+    var img = $('card-img').getBoundingClientRect();
+    var vw = doc.documentElement.clientWidth, vh = win.innerHeight;
+    result.modal = {
+      boxLeft: +box.left.toFixed(1), boxRight: +box.right.toFixed(1),
+      boxTop: +box.top.toFixed(1), boxBottom: +box.bottom.toFixed(1),
+      imgW: +img.width.toFixed(1), imgH: +img.height.toFixed(1),
+      vw: vw, vh: vh,
+      ratio: +(img.width / Math.max(1, img.height)).toFixed(3)
+    };
+    result.modalOk = box.left >= -0.5 && box.right <= vw + 0.5 &&
+                     box.top >= -0.5 && box.bottom <= vh + 0.5 &&
+                     img.width <= vw + 0.5 && Math.abs(result.modal.ratio - 0.75) < 0.02;
+    var ex = measureExternal();
+    result.external = ex.external; result.refs = ex.refs;
+  }
+
+  function done() {
+    document.getElementById('out').textContent = btoa(unescape(encodeURIComponent(JSON.stringify(result))));
+  }
+
+  (async function main() {
+    try {
+      if (MODE === 'full') await runFull();
+      else await runLayout();
+      if (!result.layout) result.layout = measureLayout();
+    } catch (e) {
+      result.error = String(e && e.message || e);
+      try { result.layout = result.layout || measureLayout(); } catch (e2) {}
+    }
+    done();
+  })();
+})();
+</script>
+</body>
+</html>

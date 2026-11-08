@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>W06 视觉快照（固定视口）</title>
+<style>
+  /* 固定视口壳：iframe 宽度即手机视口宽度。背景与产品纸白底同色，
+     截图工具多算的 20px 不会看起来像「被裁掉」。 */
+  html, body { margin: 0; padding: 0; background: #FBF7F1; }
+  #frame { display: block; border: 0; background: #FBF7F1; }
+</style>
+</head>
+<body>
+<!-- 用法：?w=390&h=844&state=first|selected|middle|complete -->
+<iframe id="frame" scrolling="no"></iframe>
+<script>
+(function () {
+  'use strict';
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = p[1];
+  });
+  var w = parseInt(q.w || '390', 10);
+  var h = parseInt(q.h || '844', 10);
+  var state = q.state || 'first';
+  var fr = document.getElementById('frame');
+  fr.style.width = w + 'px';
+  fr.style.height = h + 'px';
+  document.documentElement.style.width = w + 'px';
+  document.body.style.width = w + 'px';
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label) {
+    return new Promise(function (res, rej) {
+      var n = 0;
+      (function tick() {
+        if (pred()) return res(true);
+        if (++n > 120) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+
+  try { localStorage.clear(); } catch (e) {}
+
+  fr.addEventListener('load', function () {
+    (async function () {
+      try {
+        var win = fr.contentWindow, d = fr.contentDocument;
+        await waitFor(function () { return !!win.__ATLAS_QUIZ__; }, 'app.js');
+        d.getElementById('btn-start').click();
+        await waitFor(function () { return win.__ATLAS_QUIZ__.isReady(); }, '题库');
+        await sleep(120);
+        var Q = win.__ATLAS_QUIZ__, qs = Q.bank().questions;
+        // 无头虚拟时间不会推进 CSS transition，截图前把过渡关掉，
+        // 让进度条直接画成最终宽度（只影响截图工具，不改产品代码）
+        var fill = d.getElementById('quiz-progress-fill');
+        if (fill) { fill.style.transition = 'none'; void fill.offsetWidth; }
+
+        // 静帧需要停在「刚选中」这一刻：点完立刻 goTo 同题，取消待执行的自动切题
+        // （只影响截图，产品逻辑不变）
+        function clickAndFreeze(el) {
+          if (el) el.click();
+          Q.goTo(Q.snapshot().index);
+        }
+
+        if (state === 'selected') {
+          clickAndFreeze(d.querySelectorAll('#quiz-options .opt')[1]);
+        } else if (state === 'middle') {
+          for (var i = 0; i < 8; i++) { Q.goTo(i); Q.select(qs[i].options[i % 4].option_id); }
+          Q.goTo(8);
+          clickAndFreeze(d.querySelectorAll('#quiz-options .opt')[2]);
+        } else if (state === 'lastq') {
+          // UX01：独立完成页已删除。第 20 题选完后 360ms 就跳结果页，
+          // 想截「最终选择反馈」必须先答完前 19 题、停在第 20 题、再点选。
+          for (var j = 0; j < qs.length - 1; j++) { Q.goTo(j); Q.select(qs[j].options[j % 4].option_id); }
+          Q.goTo(qs.length - 1);
+          clickAndFreeze(d.querySelectorAll('#quiz-options .opt')[1]);
+        } else if (state === 'complete') {
+          // 旧键名兼容：现在等价于「答满 20 题 → 直接到结果页」
+          for (var k = 0; k < qs.length; k++) { Q.goTo(k); Q.select(qs[k].options[k % 4].option_id); }
+          Q.tryComplete();
+          await waitFor(function () { return d.body.getAttribute('data-screen') === 'result'; }, '结果页');
+        }
+        document.title = 'READY ' + state;
+      } catch (e) {
+        document.title = 'ERROR ' + String(e.message || e);
+      }
+    })();
+  }, { once: true });
+
+  fr.src = '../index.html?shot=' + Math.random().toString(36).slice(2);
+})();
+</script>
+</body>
+</html>

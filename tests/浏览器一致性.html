@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>scoring.js 浏览器一致性测试页（仅测试用，不进运行时）</title>
+<style>body{font-family:monospace;font-size:13px}</style>
+</head>
+<body>
+<pre id="out">RUNNING</pre>
+<script src="../js/scoring.js"></script>
+<script>
+// 目的：在真实浏览器里用 <script> 方式加载 js/scoring.js（无 module / 无 require），
+//       跑 13^5 = 371,293 组，把每组 4 个判定字段压成两个独立哈希输出。
+// Node 侧用母版 计算核心.js 跑同一批组合，比较哈希 —— 一致即证明两者逐组等价。
+// 本页不联网、不 fetch，file:// 直接可跑。
+(function () {
+  var out = document.getElementById('out');
+  var S = window.WorkplaceScoring;
+  if (!S) { out.textContent = JSON.stringify({ loaded: false, error: 'window.WorkplaceScoring 不存在，UMD 导出失败' }); return; }
+
+  var DIMS = ['W', 'L', 'M', 'C', 'G'];
+  var dimMap = [];
+  for (var i = 0; i < 5; i++) for (var k = 0; k < 4; k++) dimMap.push(DIMS[i]);
+
+  function expand(sum) {
+    var o = [1, 1, 1, 1], e = sum - 4, j = 0;
+    while (e > 0) { if (o[j] < 4) { o[j]++; e--; } j = (j + 1) % 4; }
+    return o;
+  }
+
+  var h1 = 0x811c9dc5, h2 = 5381, sumA = 0, n = 0;
+  var samples = [];
+  function mix(s) {
+    for (var i = 0; i < s.length; i++) {
+      h1 ^= s.charCodeAt(i); h1 = Math.imul(h1, 0x01000193) >>> 0;
+      h2 = (Math.imul(h2, 33) + s.charCodeAt(i)) >>> 0;
+    }
+  }
+
+  for (var a = 4; a <= 16; a++)
+  for (var b = 4; b <= 16; b++)
+  for (var c = 4; c <= 16; c++)
+  for (var d = 4; d <= 16; d++)
+  for (var e = 4; e <= 16; e++) {
+    var scores = expand(a).concat(expand(b), expand(c), expand(d), expand(e));
+    var r = S.classifyScores ? S.classifyScores(scores, dimMap) : S.classifyAnswers(scores, dimMap);
+    mix(r.species + '|' + r.overallLevel + '|' + r.subTitleDim + '|' + r.subTitleBand + '|' + r.A + '|' + r.R + '|' + r.dimSums.W);
+    sumA += r.A;
+    n++;
+    if (n === 1 || n === 185647 || n === 371293) samples.push([a, b, c, d, e, r.species, r.overallLevel, r.subTitle, r.A, r.R]);
+  }
+
+  out.textContent = JSON.stringify({
+    loaded: true,
+    userAgent: navigator.userAgent,
+    apiKeys: Object.keys(S).sort().join(','),
+    cases: n,
+    fnv: h1 >>> 0,
+    djb2: h2 >>> 0,
+    sumA: Math.round(sumA * 1000) / 1000,
+    samples: samples
+  });
+})();
+</script>
+</body>
+</html>

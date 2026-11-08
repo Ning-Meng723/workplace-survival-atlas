@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>W07/W08 结果页真浏览器自检</title>
+<!-- 只做验收：把产品页放进真实 iframe，用真实 DOM 点击驱动，结果编码到 #out 供 --dump-dom 抓取 -->
+</head>
+<body>
+<iframe id="fr" src="about:blank" style="border:0"></iframe>
+<pre id="out">PENDING</pre>
+<script>
+(function () {
+  'use strict';
+  var qs = new URLSearchParams(location.search);
+  var MODE = qs.get('mode') || 'full';
+  var W = parseInt(qs.get('w') || '390', 10);
+  var fr = document.getElementById('fr'), out = document.getElementById('out');
+  fr.width = W; fr.height = 844;
+
+  var result = {
+    done: false, mode: MODE, width: W, ua: navigator.userAgent,
+    tests: [], samples: [], card: null, layout: null, external: [], refs: [],
+    notes: [], error: ''
+  };
+  var win, doc, Q, R, S, bank, qsBank;
+
+  // 16 组可及「物种 × 状态」的真实代表：由 13^5 = 371,293 组穷举找出第一个命中者。
+  // indices 是五维指数（13 档精确值），在浏览器里再交给 scoring.js 的 classifyIndices 生成真实结果对象。
+  var REACHABLE = [
+    ['树懒|需要回血',       {W:0,L:0,M:0,C:0,G:0}],
+    ['树懒|勉强维持',       {W:0,L:0,M:0,C:100,G:100}],
+    ['树懒|基本在线',       {W:0,L:0,M:100,C:100,G:100}],
+    ['炸毛猫|需要回血',     {W:0,L:8.3333333333,M:0,C:0,G:0}],
+    ['炸毛猫|勉强维持',     {W:0,L:8.3333333333,M:91.6666666667,C:0,G:100}],
+    ['炸毛猫|基本在线',     {W:33.3333333333,L:100,M:16.6666666667,C:50,G:100}],
+    ['水豚|勉强维持',       {W:33.3333333333,L:41.6666666667,M:58.3333333333,C:58.3333333333,G:58.3333333333}],
+    ['水豚|基本在线',       {W:41.6666666667,L:58.3333333333,M:66.6666666667,C:66.6666666667,G:66.6666666667}],
+    ['水豚|状态不错',       {W:58.3333333333,L:66.6666666667,M:83.3333333333,C:83.3333333333,G:83.3333333333}],
+    ['狐狸|勉强维持',       {W:8.3333333333,L:75,M:16.6666666667,C:75,G:100}],
+    ['狐狸|基本在线',       {W:8.3333333333,L:75,M:16.6666666667,C:100,G:100}],
+    ['狐狸|状态不错',       {W:41.6666666667,L:33.3333333333,M:100,C:100,G:100}],
+    ['企鹅|勉强维持',       {W:0,L:16.6666666667,M:100,C:16.6666666667,G:66.6666666667}],
+    ['企鹅|基本在线',       {W:0,L:16.6666666667,M:100,C:83.3333333333,G:100}],
+    ['企鹅|状态不错',       {W:0,L:75,M:100,C:100,G:100}],
+    ['企鹅|需要回血',       {W:0,L:16.6666666667,M:100,C:16.6666666667,G:0}]
+  ];
+  // 4 组结构上不可达：取一份真实结果，只改 overallLevel，验证渲染层有兜底不白屏
+  var FALLBACK = [
+    ['树懒|状态不错', '树懒', '状态不错'],
+    ['炸毛猫|状态不错', '炸毛猫', '状态不错'],
+    ['水豚|需要回血', '水豚', '需要回血'],
+    ['狐狸|需要回血', '狐狸', '需要回血']
+  ];
+  var BAN = ['你就是', '你一定是', '你必须辞职', '你不适合上班', '废了', '没救', 'loser',
+             '混日子', '失败者', '抑郁', '焦虑症', '人格障碍', '心理问题', 'NPD', '八字',
+             '命理', '运势', '塔罗', '前世', '专业测评', '科学验证', '心理学证明', '准确率',
+             '建议你辞职', '建议转行', '这份工作不值得留'];
+
+  function T(id, name, ok, detail) {
+    result.tests.push({ id: id, name: name, ok: !!ok, detail: String(detail || '') });
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label, tries) {
+    return new Promise(function (res, rej) {
+      var n = 0, max = tries || 160;
+      (function tick() {
+        if (pred()) return res(true);
+        if (++n > max) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+  function emit() { out.textContent = btoa(unescape(encodeURIComponent(JSON.stringify(result)))); }
+  function $(id) { return doc.getElementById(id); }
+  function click(el) {
+    var ev = new win.MouseEvent('click', { bubbles: true, cancelable: true, view: win });
+    el.dispatchEvent(ev);
+  }
+  function visibleText() {
+    var el = $('screen-result');
+    return (el.innerText || el.textContent || '');
+  }
+  function measureLayout() {
+    var de = doc.documentElement, over = [], all = doc.querySelectorAll('body *'), i;
+    for (i = 0; i < all.length; i++) {
+      var el = all[i], r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      if (r.right <= de.clientWidth + 0.5) continue;
+      var pr = el.parentElement ? el.parentElement.getBoundingClientRect() : null;
+      if (pr && pr.right > de.clientWidth + 0.5) continue;
+      over.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' right=' + r.right.toFixed(1));
+    }
+    return {
+      clientWidth: de.clientWidth, scrollWidth: de.scrollWidth,
+      overflow: Math.max(0, de.scrollWidth - de.clientWidth),
+      over: over.slice(0, 8), overCount: over.length
+    };
+  }
+  function measureExternal() {
+    var entries = [];
+    try { entries = win.performance.getEntriesByType('resource').map(function (e) { return e.name; }); } catch (e) {}
+    var ext = entries.filter(function (u) {
+      return u.indexOf(location.origin) !== 0 && !/^data:|^blob:/.test(u);
+    });
+    var refs = [];
+    doc.querySelectorAll('[src], [href]').forEach(function (el) {
+      var v = el.getAttribute('src') || el.getAttribute('href') || '';
+      if (/^(https?:)?\/\//i.test(v)) refs.push(el.tagName.toLowerCase() + ' → ' + v);
+    });
+    return { entries: entries, external: ext, refs: refs };
+  }
+
+  async function loadFrame() {
+    try { localStorage.clear(); } catch (e) {}
+    await new Promise(function (res) {
+      fr.addEventListener('load', res, { once: true });
+      fr.src = '../index.html?w07=' + Math.random().toString(36).slice(2);
+    });
+    win = fr.contentWindow; doc = fr.contentDocument;
+    await waitFor(function () { return !!win.__ATLAS_QUIZ__ && !!win.__ATLAS_RESULT__ && !!win.WorkplaceScoring && !!win.WorkplaceResult; },
+                  '产品脚本就绪');
+    Q = win.__ATLAS_QUIZ__; R = win.__ATLAS_RESULT__; S = win.WorkplaceScoring;
+    bank = Q.bank ? Q.bank() : null;
+    qsBank = bank ? bank.questions : [];
+  }
+
+  // 真实点击：入口 → 20 题 → 结果页（UX01 起没有独立完成页，第 20 题选完直接出结果）
+  async function endToEnd() {
+    click(doc.getElementById('btn-start'));
+    await waitFor(function () { return Q.isReady(); }, '题库加载完成');
+    bank = Q.bank(); qsBank = bank.questions;
+    for (var i = 0; i < qsBank.length; i++) {
+      Q.goTo(i);
+      Q.select(qsBank[i].options[0].option_id);
+    }
+    var completed = Q.tryComplete();
+    await waitFor(function () {
+      return doc.body.getAttribute('data-screen') === 'result' && R.snapshot().resultPresent;
+    }, '结果页出现');
+    return completed;
+  }
+
+  function resultObjectFrom(indices) {
+    return S.classifyIndices(indices, S.versionsFromBank(bank));
+  }
+
+  function checkStatic() {
+    var mods = doc.querySelectorAll('#screen-result .result-mod');
+    var order = [];
+    mods.forEach(function (m) { order.push(Number(m.getAttribute('data-module'))); });
+    var orderOK = order.length === 7 && order.join(',') === '1,2,3,4,5,6,7';
+    T('R2', '结果页 7 个模块齐全且顺序固定 1→7', orderOK, '实测顺序 ' + order.join(','));
+
+    var dots = [], rows = [];
+    doc.querySelectorAll('#radar-wrap .radar-dot').forEach(function (c) {
+      dots.push(c.getAttribute('data-dim') + '=' + c.getAttribute('data-value'));
+    });
+    doc.querySelectorAll('#result-dims .dim-row').forEach(function (li) {
+      rows.push(li.getAttribute('data-dim') + '=' + li.getAttribute('data-value'));
+    });
+    var same = dots.length === 5 && rows.length === 5 && dots.join('|') === rows.join('|');
+    T('R3', '五维数字与雷达图顶点逐一同源（data-value 相同）', same,
+      '雷达 ' + dots.join(' ') + ' / 分数 ' + rows.join(' '));
+
+    var obj = R.result(), numsOK = true, detail = [];
+    if (obj && obj.dims && rows.length === 5) {
+      rows.forEach(function (kv) {
+        var p = kv.split('='), want = Number(obj.dims[p[0]]).toFixed(1);
+        if (want !== p[1]) { numsOK = false; detail.push(p[0] + ' 页面=' + p[1] + ' 结果=' + want); }
+      });
+    } else { numsOK = false; detail.push('分数行不足 5 条或无结果对象'); }
+    T('R4', '页面五维分数来自同一份结果对象（前端未重算）', numsOK,
+      numsOK ? '5 维逐一对上 scoreBank 结果对象' : detail.join('；'));
+
+    var vspan = doc.querySelectorAll('#result-versions [data-version-key]');
+    var vkeys = [], vOK = true;
+    vspan.forEach(function (s) {
+      var k = s.getAttribute('data-version-key'); vkeys.push(k);
+      if (!obj || !obj.versions || s.textContent.indexOf(String(obj.versions[k])) < 0) vOK = false;
+    });
+    T('R5', '5 个版本号出现在结果里且与题库一致',
+      vspan.length === 5 && vOK, vkeys.join(', ') + ' / 值 = ' + (obj ? JSON.stringify(obj.versions) : '无'));
+
+    var text = visibleText();
+    var leftover = text.match(/\{[^{}]+\}/g) || [];
+    T('R8', '槽位全部填完，页面无残留占位符', text.length > 100 && leftover.length === 0,
+      '残留 ' + JSON.stringify(leftover) + '；动态解释=' + $('result-dynamic').textContent.slice(0, 70));
+
+    var dyn = $('result-dynamic').textContent;
+    T('R9', '动态解释带真实分数 + 维度名称（回答「为什么是我」）',
+      /\d+\.\d/.test(dyn) && /指数/.test(dyn), dyn.slice(0, 100));
+
+    var decls = doc.querySelectorAll('#result-declare p');
+    var declTexts = [];
+    decls.forEach(function (p) { declTexts.push(p.textContent); });
+    var needHelp = $('result-badge').getAttribute('data-level') === '需要回血';
+    var declOK = decls.length >= 1 && declTexts[0].indexOf('娱乐向自我梳理') >= 0 &&
+                 (needHelp ? decls.length === 2 && declTexts[1].indexOf('找专业的人聊聊') >= 0
+                           : decls.length === 1);
+    T('R10', '必备声明固定可见；仅「需要回血」档追加求助提示', declOK,
+      '档位=' + $('result-badge').getAttribute('data-level') + ' / 声明 ' + decls.length + ' 条：' + declTexts.join(' | '));
+
+    var hits = BAN.filter(function (w) { return text.indexOf(w) >= 0; });
+    var pct = (text.match(/超过\s*\d+\s*%|超过了\s*\d+\s*%/g) || []);
+    var isType = (text.match(/你是[^，。\s]{0,8}型/g) || []);
+    T('R11', '页面无禁用词 / 无「你是XX型」/ 无编造分布',
+      text.length > 100 && hits.length === 0 && pct.length === 0 && isType.length === 0,
+      '命中禁词 ' + JSON.stringify(hits) + ' / 百分比 ' + JSON.stringify(pct) + ' / 绝对判断 ' + JSON.stringify(isType));
+
+    T('R12', '副称号带解释、优势与困境按平均分分档、建议非空',
+      !!$('result-subtitle').textContent && !!$('result-subtitle-explain').textContent &&
+      !!$('result-advantage').textContent && !!$('result-difficulty').textContent &&
+      !!$('result-advice').textContent && !!$('result-quote').textContent,
+      '副称号=' + $('result-subtitle').textContent + ' / 解释=' + $('result-subtitle-explain').textContent.slice(0, 30) + '…');
+  }
+
+  function checkSamples() {
+    var versions = S.versionsFromBank(bank);
+    var allOK = true, list = [];
+    REACHABLE.forEach(function (pair) {
+      var obj, m, ok = false, detail = '';
+      try {
+        obj = resultObjectFrom(pair[1]);
+        if (obj.species + '|' + obj.overallLevel !== pair[0]) {
+          detail = '算法结果与样本标注不符：' + obj.species + '|' + obj.overallLevel;
+        } else {
+          m = win.WorkplaceResult.buildModel(obj, R.copy());
+          R.renderWith(obj);
+          var v = $('result-verdict').textContent.trim();
+          ok = m.ok && !!v && $('mod-5').getAttribute('data-reachable') === 'true' &&
+               v.indexOf('结构上不可达') < 0 && !!$('result-advice').textContent.trim();
+          detail = '物种=' + $('result-species').textContent + ' / 判词=' + v.slice(0, 26) + '…';
+        }
+      } catch (e) { detail = String(e.message || e); }
+      if (!ok) allOK = false;
+      list.push({ key: pair[0], ok: ok, detail: detail });
+    });
+    result.reachableSamples = list;
+    T('R6', '16 组可及「物种 × 状态」各渲染一次，均不白屏且判词正确',
+      allOK && list.length === 16, list.map(function (x) { return x.key + (x.ok ? '✓' : '✗'); }).join(' '));
+
+    // 4 组兜底：只改 overallLevel，其余字段仍来自真实算法结果
+    var base = resultObjectFrom(REACHABLE[0][1]);
+    var fbOK = true, fb = [];
+    FALLBACK.forEach(function (f) {
+      var obj = JSON.parse(JSON.stringify(base));
+      obj.species = f[1]; obj.overallLevel = f[2]; obj.versions = versions;
+      var ok = false, detail = '';
+      try {
+        var m = win.WorkplaceResult.buildModel(obj, R.copy());
+        R.renderWith(obj);
+        var v = $('result-verdict').textContent.trim();
+        ok = m.ok && !!v && $('mod-5').getAttribute('data-reachable') === 'false' &&
+             v.indexOf('结构上不可达') < 0 && !!$('result-advice').textContent.trim() &&
+             $('screen-result').innerText.indexOf('白屏') < 0;
+        detail = '判词=' + v.slice(0, 30) + '… / 可达标记=' + $('mod-5').getAttribute('data-reachable');
+      } catch (e) { detail = String(e.message || e); }
+      if (!ok) fbOK = false;
+      fb.push({ key: f[0], ok: ok, detail: detail });
+    });
+    result.fallbackSamples = fb;
+    T('R7', '4 组不可达组合有兜底文案、不白屏、内部说明不外露',
+      fbOK && fb.length === 4, fb.map(function (x) { return x.key + (x.ok ? '✓' : '✗'); }).join(' '));
+    result.samples = list.concat(fb);
+  }
+
+  async function checkCard() {
+    // 重新走一遍完整流程，确保拿到真实结果（不拿兜底样本出图）
+    await loadFrame();
+    await endToEnd();
+    click($('btn-make-card'));
+    // UX01：分享卡改为弹窗预览，判定「弹窗已打开 + 卡片已生成」
+    await waitFor(function () { return R.modalOpen() && !!R.card(); }, '分享卡片弹窗打开');
+    var info = R.card();
+    result.card = {
+      width: info.width, height: info.height, bytes: info.bytes,
+      lineCount: info.lineCount, lines: info.lines,
+      illustrationOk: info.illustrationOk,
+      criticalMaxY: info.criticalMaxY, safeBottomY: info.safeBottomY,
+      subtitlePx: info.subtitlePx, speciesPx: info.speciesPx, quotePx: info.quotePx,
+      text: info.text, dataUrlPrefix: ($('card-img').getAttribute('src') || '').slice(0, 24),
+      downloadPrefix: ($('card-download').getAttribute('href') || '').slice(0, 24),
+      species: $('result-species').textContent
+    };
+    // 真实导出图 + 200px 缩略图（规范 6.7），交给 Node 写成 PNG 证据
+    result.card.pngDataUrl = info.dataUrl || '';
+    try {
+      var thumb = doc.createElement('canvas');
+      thumb.width = 200;
+      thumb.height = Math.round(200 * info.height / info.width);
+      thumb.getContext('2d').drawImage(info.canvas, 0, 0, thumb.width, thumb.height);
+      result.card.thumbDataUrl = thumb.toDataURL('image/png');
+    } catch (e) { result.card.thumbDataUrl = ''; result.notes.push('缩略图失败：' + e.message); }
+    T('R13', '分享卡为 1080×1440 PNG、≤2MB、台词 ≤2 行',
+      info.width === 1080 && info.height === 1440 && info.ok &&
+      info.bytes > 1000 && info.bytes <= 2 * 1024 * 1024 && info.lineCount <= 2,
+      info.width + '×' + info.height + ' / ' + Math.round(info.bytes / 1024) + ' KB / 台词 ' +
+      info.lineCount + ' 行：' + info.lines.join(' / '));
+    var t = info.text || '';
+    var bad = [];
+    if (/二维码|qrcode|扫码/i.test(t)) bad.push('二维码');
+    if (/\d+\.\d/.test(t)) bad.push('五维小数');
+    if (/超过\s*\d+%|准确率|专业|科学验证|心理学证明/.test(t)) bad.push('违规量化/资质词');
+    if (/雷达|维度指数|平均分|极差/.test(t)) bad.push('雷达/五维数字');
+    if (/专属|唯一/.test(t)) bad.push('副称号唯一性表达');
+    T('R14', '卡片无二维码 / 五维数字 / 雷达图 / 百分比 / 资质词',
+      bad.length === 0,
+      bad.length ? '命中：' + bad.join('、') : '卡片文字：' + t.replace(/\n/g, ' | ').slice(0, 150));
+    T('R15', '卡片安全区与字号合规（底部 200px 无关键信息、副称号 ≤30px）',
+      info.criticalMaxY <= info.safeBottomY && info.subtitlePx <= 30 &&
+      info.speciesPx >= 96 && info.quotePx >= 44,
+      '关键信息最低 y=' + info.criticalMaxY + ' ≤ 安全线 ' + info.safeBottomY +
+      ' / 物种 ' + info.speciesPx + 'px / 台词 ' + info.quotePx + 'px / 副称号 ' + info.subtitlePx + 'px');
+    T('R16', '卡片可下载 + 可长按保存，插画来自同源 SVG',
+      /^data:image\/png/.test($('card-img').getAttribute('src') || '') &&
+      /^data:image\/png/.test($('card-download').getAttribute('href') || '') &&
+      $('card-download').getAttribute('download').indexOf('.png') > 0 &&
+      info.illustrationOk === true,
+      'img=' + result.card.dataUrlPrefix + '… / a=' + result.card.downloadPrefix + '… / 插画加载=' + info.illustrationOk);
+  }
+
+  async function runFull() {
+    await loadFrame();
+    var completed = await endToEnd();
+    var snap = R.snapshot();
+    T('R1', '真实点击：入口 → 20 题 → 完成态 → 结果页（端到端跑通）',
+      completed.ok && snap.screen === 'result' && snap.resultPresent && !!$('result-species').textContent,
+      '完成=' + completed.ok + ' / 屏幕=' + snap.screen + ' / 物种=' + $('result-species').textContent +
+      ' / 版本=' + JSON.stringify(R.result().versions));
+    checkStatic();
+    await checkCard();
+    checkSamples();
+  }
+
+  async function runLayout() {
+    await loadFrame();
+    await endToEnd();
+    var ex = measureExternal();
+    result.external = ex.external; result.refs = ex.refs;
+    result.notes.push('资源条目 ' + ex.entries.length + ' 个（含题库/文案/SVG/三个 JS），全部同源');
+  }
+
+  async function main() {
+    try {
+      if (MODE === 'full') await runFull();
+      else await runLayout();
+      result.layout = measureLayout();
+      var ex = measureExternal();
+      result.external = ex.external; result.refs = ex.refs;
+      T('R17', W + 'px 结果页无横向溢出',
+        result.layout.overflow === 0 && result.layout.overCount === 0,
+        'clientWidth=' + result.layout.clientWidth + ' / scrollWidth=' + result.layout.scrollWidth +
+        ' / 溢出 ' + result.layout.overflow + 'px / 越界元素 ' + result.layout.overCount +
+        (result.layout.over.length ? '：' + result.layout.over.join('；') : ''));
+      T('R18', '外部网络请求为零（资源全同源、页面无外链）',
+        ex.external.length === 0 && ex.refs.length === 0,
+        '资源 ' + ex.entries.length + ' 个 / 外部 ' + ex.external.length + ' / 外链标签 ' + ex.refs.length);
+      result.done = true;
+    } catch (e) {
+      result.error = String(e && e.message || e);
+      result.done = true;
+    }
+    emit();
+  }
+  main();
+})();
+</script>
+</body>
+</html>

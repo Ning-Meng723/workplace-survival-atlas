@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>UX02 跳过题目 · 视觉快照（固定视口）</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #FBF7F1; }
+  #frame { display: block; border: 0; background: #FBF7F1; }
+</style>
+</head>
+<body>
+<!-- 用法：?w=390&h=844&state=skip|skipped|block|partial -->
+<iframe id="frame" scrolling="no"></iframe>
+<script>
+(function () {
+  'use strict';
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var w = parseInt(q.w || '390', 10), h = parseInt(q.h || '844', 10);
+  var state = q.state || 'skip';
+  var fr = document.getElementById('frame');
+  fr.style.width = w + 'px'; fr.style.height = h + 'px';
+  document.documentElement.style.width = w + 'px';
+  document.body.style.width = w + 'px';
+
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label, tries) {
+    return new Promise(function (res, rej) {
+      var n = 0, max = tries || 200;
+      (function tick() {
+        var v = false;
+        try { v = !!pred(); } catch (e) { v = false; }
+        if (v) return res(true);
+        if (++n > max) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+  try { localStorage.clear(); } catch (e) {}
+
+  fr.addEventListener('load', function () {
+    (async function () {
+      try {
+        var win = fr.contentWindow, d = fr.contentDocument;
+        await waitFor(function () { return !!win.__ATLAS_QUIZ__ && !!win.__ATLAS_RESULT__ && !!win.WorkplaceScoring; }, '脚本就绪');
+        var Q = win.__ATLAS_QUIZ__, R = win.__ATLAS_RESULT__;
+        d.getElementById('btn-start').click();
+        await waitFor(function () { return Q.isReady(); }, '题库');
+        await sleep(120);
+        var qs = Q.bank().questions;
+
+        function opt(qid, score) {
+          var qq = null, i, j;
+          for (i = 0; i < qs.length; i++) if (qs[i].id === qid) qq = qs[i];
+          for (j = 0; j < qq.options.length; j++) if (qq.options[j].score === score) return qq.options[j].option_id;
+          return qq.options[0].option_id;
+        }
+
+        if (state === 'skip') {
+          Q.goTo(0);
+        } else if (state === 'skipped') {
+          Q.goTo(0); Q.skip(false);      // 不自动切题，停在本题看「已跳过」态
+        } else if (state === 'block') {
+          // W 维只留 1 题有效回答（其余跳过），其余维全答 → 触发拦截面板
+          Q.goTo(0); Q.select(opt(qs[0].id, 4));
+          Q.goTo(1); Q.skip(false);
+          Q.goTo(2); Q.skip(false);
+          Q.goTo(3); Q.skip(false);
+          for (var i = 4; i < qs.length; i++) { Q.goTo(i); Q.select(opt(qs[i].id, 3)); }
+          Q.goTo(qs.length - 1);
+          await sleep(100);
+          Q.tryComplete();
+          await sleep(200);
+        } else {
+          // partial：W 维 2 题有效 + 2 题跳过，其余维全答 → 结果页带跳过说明
+          Q.goTo(0); Q.select(opt(qs[0].id, 4));
+          Q.goTo(1); Q.select(opt(qs[1].id, 3));
+          Q.goTo(2); Q.skip(false);
+          Q.goTo(3); Q.skip(false);
+          for (var k = 4; k < qs.length; k++) { Q.goTo(k); Q.select(opt(qs[k].id, 3)); }
+          Q.goTo(qs.length - 1);
+          await sleep(100);
+          Q.tryComplete();
+          await waitFor(function () { return d.body.getAttribute('data-screen') === 'result'; }, '结果页');
+          await sleep(150);
+          // 滚到「五维状态图」那一屏，让跳过说明进画面
+          var mod3 = d.getElementById('mod-3');
+          if (mod3 && mod3.scrollIntoView) mod3.scrollIntoView(true);
+        }
+        document.title = 'READY ' + state;
+      } catch (e) {
+        document.title = 'ERROR ' + String(e.message || e);
+      }
+    })();
+  }, { once: true });
+
+  fr.src = '../index.html?shot=' + Math.random().toString(36).slice(2);
+})();
+</script>
+</body>
+</html>

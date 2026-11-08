@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>W06 答题页真实浏览器自检</title>
+<style>
+  body { font: 12px/1.6 monospace; margin: 0; padding: 10px; }
+  iframe { border: 0; display: block; }
+  pre { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<pre id="out">PENDING</pre>
+<iframe id="fr" width="390" height="844"></iframe>
+<script>
+/* 说明：本页是验收工具，不是产品代码，可以用现代 JS。
+   真实浏览器里用 iframe 加载 index.html，通过 DOM 点击驱动交互；
+   结果 base64 后写进 <pre id="out">，供 Node 侧 --dump-dom 抓取。
+   用法：?w=390&mode=full   /   ?w=320&mode=layout
+*/
+(function () {
+  'use strict';
+
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = p[1];
+  });
+  var W = parseInt(q.w || '390', 10);
+  var MODE = q.mode || 'full';
+
+  var fr = document.getElementById('fr');
+  var out = document.getElementById('out');
+  fr.width = W;
+  fr.height = 844;
+
+  var result = {
+    done: false, mode: MODE, width: W, ua: navigator.userAgent,
+    origin: location.origin, ready: false, error: '',
+    tests: [], extras: [], layout: null, fit: null, external: [], refs: [],
+    bankInfo: null, storage: null, notes: []
+  };
+  var win, doc, Q, bank, qs;
+
+  function T(id, name, ok, detail) {
+    result.tests.push({ id: id, name: name, ok: !!ok, detail: String(detail || '') });
+  }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label, tries) {
+    return new Promise(function (res, rej) {
+      var n = 0, max = tries || 120;
+      (function tick() {
+        if (pred()) return res(true);
+        if (++n > max) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function emit() {
+    var json = JSON.stringify(result);
+    out.textContent = btoa(unescape(encodeURIComponent(json)));   // UTF-8 → base64
+  }
+  function $(id) { return doc.getElementById(id); }
+  function opts() { return doc.querySelectorAll('#quiz-options .opt'); }
+  function click(el) {
+    // 真实 DOM 点击（不是直接调函数）
+    var ev = new win.MouseEvent('click', { bubbles: true, cancelable: true, view: win });
+    el.dispatchEvent(ev);
+  }
+  function findQ(id) { for (var i = 0; i < qs.length; i++) if (qs[i].id === id) return qs[i]; return null; }
+  function idxOf(id) { for (var i = 0; i < qs.length; i++) if (qs[i].id === id) return i; return -1; }
+
+  // ---------- 布局 / 长文本 / 外链 ----------
+  function measureLayout() {
+    var de = doc.documentElement, bd = doc.body;
+    var over = [], all = doc.querySelectorAll('body *');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i], r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      if (r.right <= de.clientWidth + 0.5) continue;
+      var pr = el.parentElement ? el.parentElement.getBoundingClientRect() : null;
+      if (pr && pr.right > de.clientWidth + 0.5) continue;  // 父元素也超了，由父代表
+      over.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' right=' + r.right.toFixed(1));
+    }
+    var geom = [];
+    [['题干', '#quiz-stem'], ['选项组', '#quiz-options'], ['上一题', '#btn-prev'],
+     ['进度条', '#quiz-progress'], ['底部条', '#actionbar-quiz']
+    ].forEach(function (p) {
+      var e = doc.querySelector(p[1]);
+      if (!e) return;
+      var r = e.getBoundingClientRect();
+      geom.push(p[0] + ' left=' + r.left.toFixed(1) + ' right=' + r.right.toFixed(1) + ' h=' + r.height.toFixed(1));
+    });
+    return {
+      clientWidth: de.clientWidth, scrollWidth: de.scrollWidth,
+      bodyScrollWidth: bd.scrollWidth,
+      overflow: Math.max(0, de.scrollWidth - de.clientWidth),
+      over: over.slice(0, 8), overCount: over.length, geom: geom
+    };
+  }
+
+  function fitOf(el) {
+    var cs = win.getComputedStyle(el);
+    return {
+      clipped: (el.scrollHeight > el.clientHeight + 1) || (el.scrollWidth > el.clientWidth + 1),
+      ellipsis: cs.textOverflow === 'ellipsis',
+      hidden: cs.overflow === 'hidden' || cs.overflowY === 'hidden',
+      whiteSpace: cs.whiteSpace,
+      text: el.textContent
+    };
+  }
+
+  function measureFit() {
+    var stemQ = qs[0], optQ = qs[0], optO = qs[0].options[0], ms = 0, mo = 0;
+    qs.forEach(function (qq) {
+      if (qq.text.length > ms) { ms = qq.text.length; stemQ = qq; }
+      qq.options.forEach(function (o) { if (o.text.length > mo) { mo = o.text.length; optQ = qq; optO = o; } });
+    });
+    Q.goTo(idxOf(stemQ.id));
+    var stem = fitOf($('quiz-stem'));
+    Q.goTo(idxOf(optQ.id));
+    var cells = opts(), optFit = null;
+    for (var i = 0; i < cells.length; i++) {
+      if (cells[i].getAttribute('data-option-id') === optO.option_id) {
+        optFit = fitOf(cells[i].querySelector('.opt-text'));
+        optFit.button = fitOf(cells[i]);
+        break;
+      }
+    }
+    return {
+      stemQuestion: stemQ.id, stemLen: ms, stem: stem,
+      stemMatchesBank: stem.text === stemQ.text,
+      optionQuestion: optQ.id, optionId: optO.option_id, optionLen: mo, option: optFit,
+      optionMatchesBank: !!optFit && optFit.text === optO.text
+    };
+  }
+
+  function measureExternal() {
+    var entries = [];
+    try {
+      entries = win.performance.getEntriesByType('resource').map(function (e) { return e.name; });
+    } catch (e) {}
+    var ext = entries.filter(function (u) {
+      return u.indexOf(location.origin) !== 0 && !/^data:|^blob:/.test(u);
+    });
+    var refs = [];
+    doc.querySelectorAll('[src], [href]').forEach(function (el) {
+      var v = el.getAttribute('src') || el.getAttribute('href') || '';
+      if (/^(https?:)?\/\//i.test(v)) refs.push(el.tagName.toLowerCase() + ' → ' + v);
+    });
+    return { entries: entries, external: ext, refs: refs };
+  }
+
+  // ---------- 功能测试 ----------
+  async function runFull() {
+    // T1 + T2：20 题全显示、每题 4 选项与 JSON 一致
+    var t1 = [], t2 = [];
+    for (var i = 0; i < qs.length; i++) {
+      Q.goTo(i);
+      var qq = qs[i];
+      if ($('quiz-stem').textContent !== qq.text) t1.push(qq.id + ' 题干不符');
+      if ($('quiz-count').textContent !== pad(i + 1) + ' / 20') t1.push(qq.id + ' 题号 ' + $('quiz-count').textContent);
+      if ($('quiz-qid').textContent !== qq.id) t1.push(qq.id + ' QID ' + $('quiz-qid').textContent);
+      var cells = opts();
+      if (cells.length !== 4) { t2.push(qq.id + ' 选项数 ' + cells.length); continue; }
+      var map = {};
+      for (var j = 0; j < cells.length; j++) {
+        map[cells[j].getAttribute('data-option-id')] = cells[j].querySelector('.opt-text').textContent;
+      }
+      for (var k = 0; k < qq.options.length; k++) {
+        var o = qq.options[k];
+        if (map[o.option_id] !== o.text) t2.push(qq.id + '/' + o.option_id + ' 文字不符');
+      }
+      if (Object.keys(map).length !== 4) t2.push(qq.id + ' option_id 重复');
+    }
+    T('T1', '20 题全部正常显示（题干 / 题号 / QID 与题库一致）', !t1.length && qs.length === 20,
+      t1.length ? t1.slice(0, 5).join('；') : '20/20 题逐题比对通过');
+    T('T2', '每题 4 个选项的文字与题库 JSON 逐字一致（按 option_id 比对）', !t2.length,
+      t2.length ? t2.slice(0, 5).join('；') : '20 题 × 4 选项 = 80 条全部一致');
+
+    // T3：选中状态
+    Q.goTo(0);
+    var first = opts()[0], firstOid = first.getAttribute('data-option-id');
+    click(first);
+    var s3 = Q.snapshot(), sel3 = doc.querySelectorAll('#quiz-options .opt.is-selected');
+    T('T3', '选择后选中状态正确（is-selected / aria-pressed / 记录 option_id）',
+      s3.answers[qs[0].id] === firstOid && sel3.length === 1 &&
+      sel3[0].getAttribute('data-option-id') === firstOid &&
+      sel3[0].getAttribute('aria-pressed') === 'true',
+      '记录 ' + s3.answers[qs[0].id] + ' / 选中 ' + sel3.length + ' 个');
+
+    // T4：未选择不能进入下一题
+    // UX01 起没有「下一题」按钮：断言改为「前进被拒 + 不会自动跳题」
+    Q.goTo(1);
+    var before4 = Q.snapshot().index, moved4 = Q.next();
+    await sleep(560);                       // 超过自动切题时长，确认它不会自己走
+    var after4 = Q.snapshot().index;
+    T('T4', '未选择时不能进入下一题（前进/左滑被拒，也不会自动跳题）',
+      moved4 === false && before4 === 1 && after4 === 1,
+      '前进返回=' + moved4 + ' / 题号 ' + before4 + ' → ' + after4);
+
+    // T5：选中后自动进入下一题；上一题可回退（UX01 交互，原「点下一题」已删除）
+    Q.goTo(1);
+    await sleep(200);
+    var o5 = findQ(qs[1].id).options[2].option_id, cell5 = null;
+    opts().forEach(function (b) { if (b.getAttribute('data-option-id') === o5) cell5 = b; });
+    click(cell5);
+    await sleep(560);
+    var i51 = Q.snapshot().index;
+    click($('btn-prev'));
+    await sleep(260);
+    var i52 = Q.snapshot().index;
+    T('T5', '选中后自动进入下一题；「上一题」可回退',
+      i51 === 2 && i52 === 1,
+      '第 2 题选中 → ' + (i51 + 1) + ' → 回退 ' + (i52 + 1));
+
+    // T6：前进后退不丢答案
+    Q.goTo(0);
+    var s6 = Q.snapshot();
+    var sel6 = doc.querySelectorAll('#quiz-options .opt.is-selected');
+    T('T6', '前进后退不丢答案（选中态按 option_id 复原）',
+      s6.answers[qs[0].id] === firstOid && sel6.length === 1 &&
+      sel6[0].getAttribute('data-option-id') === firstOid,
+      '回答 ' + s6.answers[qs[0].id] + ' / 选中 ' + sel6.length + ' 个');
+
+    // T7：选项乱序不改 option_id
+    Q.goTo(0);
+    var origOrder = Q.orderOf(qs[0].id).slice();
+    var rev = origOrder.slice().reverse();
+    var setOk = Q.setOrder(qs[0].id, rev);
+    var domOrder = [];
+    opts().forEach(function (b) { domOrder.push(b.getAttribute('data-option-id')); });
+    var s7 = Q.snapshot();
+    var score7 = Q.scoreOf(s7.answers[qs[0].id]);
+    var bankScore = null;
+    findQ(qs[0].id).options.forEach(function (o) { if (o.option_id === s7.answers[qs[0].id]) bankScore = o.score; });
+    var newFirst = opts()[0], newFirstOid = newFirst.getAttribute('data-option-id');
+    click(newFirst);
+    var s7b = Q.snapshot();
+    await sleep(560);                 // 等自动切题的定时器走完，避免影响 T8
+    Q.goTo(0);
+    T('T7', '选项乱序不会改变 option_id（显示顺序变了，身份与分值不变）',
+      setOk && domOrder.join(',') === rev.join(',') &&
+      s7.answers[qs[0].id] === firstOid && score7 === bankScore &&
+      s7b.answers[qs[0].id] === newFirstOid,
+      '乱序后 DOM 顺序 ' + domOrder.join(',') + '；点第一个记录 ' + s7b.answers[qs[0].id] +
+      '；按 option_id 查分 ' + score7 + '（题库 ' + bankScore + '）');
+
+    // T8：缺任意一题不能出结果；补齐后直接进结果页
+    // UX01 起独立完成页已删除：原断言「进入完成态 → 点查看结果」按新口径改写。
+    for (var m = 0; m < qs.length; m++) {
+      Q.goTo(m);
+      Q.select(qs[m].options[0].option_id);
+    }
+    Q.removeAnswer(qs[12].id);       // 故意删掉第 13 题
+    var miss = Q.missing();
+    var r8a = Q.tryComplete();
+    await sleep(160);
+    var screen8a = doc.body.getAttribute('data-screen');
+    var noCompletePage = !doc.getElementById('quiz-complete') && !doc.getElementById('btn-view-result');
+    Q.goTo(12);
+    Q.select(findQ(qs[12].id).options[1].option_id);
+    var r8b = Q.tryComplete();
+    await waitFor(function () {
+      return doc.body.getAttribute('data-screen') === 'result' &&
+             !!win.__ATLAS_RESULT__ && win.__ATLAS_RESULT__.snapshot().resultPresent;
+    }, '结果页渲染完成');
+    var screenAfter = doc.body.getAttribute('data-screen');
+    var speciesText = $('result-species').textContent;
+    var R = win.__ATLAS_RESULT__;
+    T('T8', '缺任意一题不能出结果；补齐后不经完成页直接进结果页',
+      miss.length === 1 && miss[0] === qs[12].id && !r8a.ok && screen8a === 'quiz' &&
+      r8b.ok && noCompletePage && screenAfter === 'result' && !!speciesText && R.snapshot().resultPresent,
+      '缺 ' + miss.join(',') + ' 时被拒（screen=' + screen8a + '）；补齐后 screen=' + screenAfter +
+      '，物种=' + speciesText + '，完成页已删除=' + noCompletePage);
+
+    // T9：重新开始清空旧答案（UX01：完成页没了，「再测一次」在结果页顶栏）
+    click($('btn-result-restart'));
+    await sleep(200);
+    var s9 = Q.snapshot();
+    var raw9 = null;
+    try { raw9 = win.localStorage.getItem('atlas.quiz.v1'); } catch (e) {}
+    var storedCount = 0;
+    try { storedCount = Object.keys(JSON.parse(raw9 || '{}').answers || {}).length; } catch (e) {}
+    T('T9', '重新开始清空旧答案（内存 + localStorage + 回到第 1 题）',
+      s9.count === 0 && s9.index === 0 && s9.phase === 'answering' && storedCount === 0 &&
+      doc.body.getAttribute('data-screen') === 'quiz',
+      '内存 ' + s9.count + ' 条 / 存档 ' + storedCount + ' 条 / index=' + s9.index +
+      ' / phase=' + s9.phase + ' / screen=' + doc.body.getAttribute('data-screen'));
+
+    // T12：外部网络请求为零
+    var ex = measureExternal();
+    result.external = ex.external;
+    result.refs = ex.refs;
+    T('T12', '外部网络请求为零（资源条目全部同源，页面无外链）',
+      ex.external.length === 0 && ex.refs.length === 0,
+      '资源条目 ' + ex.entries.length + ' 个，外部 ' + ex.external.length + ' 个，外链标签 ' + ex.refs.length + ' 个');
+
+    // 附加：存档里没有个人信息字段
+    var rawAll = '';
+    try { rawAll = win.localStorage.getItem('atlas.quiz.v1') || ''; } catch (e) {}
+    result.storage = { length: rawAll.length, hasPII: /name|phone|mobile|email|姓名|手机|邮箱/i.test(rawAll) };
+    result.notes.push('localStorage 只存 v / bankKey / answers / order / index，不含任何个人信息字段');
+
+    // 回到答题页（answering）后再测布局与长文本
+    Q.goTo(0);
+  }
+
+  async function runLayout() {
+    var ex = measureExternal();
+    result.external = ex.external;
+    result.refs = ex.refs;
+    T('T12', '外部网络请求为零（资源条目全部同源，页面无外链）',
+      ex.external.length === 0 && ex.refs.length === 0,
+      '资源条目 ' + ex.entries.length + ' 个，外部 ' + ex.external.length + ' 个，外链标签 ' + ex.refs.length + ' 个');
+  }
+
+  // 重新加载产品页并真实点击「开始测试」，等待题库读完
+  async function loadFrame() {
+    await new Promise(function (res) {
+      fr.addEventListener('load', res, { once: true });
+      fr.src = '../index.html?selftest=' + Math.random().toString(36).slice(2);
+    });
+    win = fr.contentWindow;
+    doc = fr.contentDocument;
+    await waitFor(function () { return !!win.__ATLAS_QUIZ__; }, 'app.js 就绪');
+    click(doc.getElementById('btn-start'));
+    await waitFor(function () { return win.__ATLAS_QUIZ__.isReady(); }, '题库加载完成');
+    await sleep(120);
+    Q = win.__ATLAS_QUIZ__;
+    bank = Q.bank();
+    qs = bank.questions;
+  }
+
+  // 附加验证（不计入 12 项）：超长文本压力、版本变化、异常存档
+  async function runExtra() {
+    var extras = [];
+    // A1：题库最长题干才 30 字，不足以证明长文本不截断，这里注入中英混排超长串
+    try {
+      Q.goTo(0);
+      var stem = $('quiz-stem'), optText = opts()[0].querySelector('.opt-text');
+      var s0 = stem.textContent, o0 = optText.textContent;
+      var longCn = '这是一段用来测试自动换行能力的很长的职场处境描述文字'.repeat(12);
+      var longEn = 'SupercalifragilisticexpialidociousABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.repeat(6);
+      var injected = longCn + longEn;
+      stem.textContent = injected;
+      optText.textContent = injected;
+      var f1 = fitOf(stem), f2 = fitOf(optText);
+      var de = doc.documentElement;
+      var noOverflow = de.scrollWidth <= de.clientWidth;
+      extras.push({
+        id: 'A1', name: '超长文本压力（中英混排，不截断、不省略、不横向溢出）',
+        ok: !f1.clipped && !f2.clipped && !f1.ellipsis && !f2.ellipsis && noOverflow,
+        detail: '注入 ' + injected.length + ' 字；题干 clipped=' + f1.clipped + '，选项 clipped=' +
+                f2.clipped + '，页面横向溢出 ' + (de.scrollWidth - de.clientWidth) + 'px'
+      });
+      stem.textContent = s0; optText.textContent = o0;
+    } catch (e) { extras.push({ id: 'A1', name: '超长文本压力', ok: false, detail: String(e.message || e) }); }
+
+    // A2：题库版本变化 → 旧答案必须清空、回到第 1 题
+    try {
+      var trueKey = Q.snapshot().bankKey;
+      win.localStorage.setItem('atlas.quiz.v1', JSON.stringify({
+        v: 2, bankKey: trueKey + '.OLD', answers: { Q01: 'Q01-O1', Q02: 'Q02-O2' },
+        order: {}, index: 7
+      }));
+      await loadFrame();
+      var s2 = Q.snapshot();
+      extras.push({
+        id: 'A2', name: '题库版本变化 → 旧答案自动清空并回到第 1 题',
+        ok: s2.versionsChanged === true && s2.count === 0 && s2.index === 0,
+        detail: 'versionsChanged=' + s2.versionsChanged + ' / count=' + s2.count + ' / index=' + s2.index
+      });
+    } catch (e) { extras.push({ id: 'A2', name: '版本变化处理', ok: false, detail: String(e.message || e) }); }
+
+    // A3a：存档是坏 JSON → 不能崩、不能带出脏答案
+    try {
+      win.localStorage.setItem('atlas.quiz.v1', '{ 这不是 JSON');
+      await loadFrame();
+      var sa = Q.snapshot();
+      extras.push({
+        id: 'A3a', name: '异常存档（非法 JSON）→ 不崩溃、答案归零',
+        ok: sa.ready === true && sa.count === 0 && sa.index === 0 && !sa.error,
+        detail: 'ready=' + sa.ready + ' / count=' + sa.count + ' / index=' + sa.index + ' / error=' + (sa.error || '无')
+      });
+    } catch (e) { extras.push({ id: 'A3a', name: '非法 JSON 存档', ok: false, detail: String(e.message || e) }); }
+
+    // A3b：存档里有假 option_id / 假题号 / 非法顺序 / 越界 index → 逐条过滤
+    try {
+      var key3 = Q.snapshot().bankKey;
+      win.localStorage.setItem('atlas.quiz.v1', JSON.stringify({
+        v: 2, bankKey: key3,
+        answers: { Q01: 'FAKE-O9', Q02: 'Q02-O3', NOPE: 'X' },
+        order: { Q01: ['Q01-O1', 'Q01-O1', 'BAD', 'Q01-O2'] },
+        index: 999
+      }));
+      await loadFrame();
+      var sb = Q.snapshot();
+      var ord1 = sb.order.Q01 || [];
+      var ordOK = ord1.length === 4 && new Set(ord1).size === 4 &&
+                  ord1.every(function (x) { return /^Q01-O[1-4]$/.test(x); });
+      extras.push({
+        id: 'A3b', name: '异常存档（假 option_id / 假题号 / 非法顺序 / 越界 index）→ 逐条过滤',
+        ok: !sb.answers.Q01 && sb.answers.Q02 === 'Q02-O3' && !sb.answers.NOPE &&
+            sb.index === 0 && ordOK,
+        detail: '保留合法答案 Q02=' + sb.answers.Q02 + '；滤掉 Q01 假值与 NOPE；index=' +
+                sb.index + '；Q01 显示顺序修复=' + ordOK + '（' + ord1.join(',') + '）'
+      });
+    } catch (e) { extras.push({ id: 'A3b', name: '异常存档过滤', ok: false, detail: String(e.message || e) }); }
+
+    return extras;
+  }
+
+  async function main() {
+    try {
+      // 干净起点：清掉上一次验收残留，再强制重载 iframe
+      try { localStorage.clear(); } catch (e) {}
+      await loadFrame();
+      result.ready = true;
+      result.bankInfo = {
+        questions: qs.length,
+        options: qs.reduce(function (n, x) { return n + x.options.length; }, 0),
+        version: JSON.stringify(bank.meta['数据版本'])
+      };
+
+      if (MODE === 'full') {
+        await runFull();
+        result.extras = await runExtra();
+      } else await runLayout();
+
+      result.layout = measureLayout();
+      result.fit = measureFit();
+
+      T('T10', W + 'px 视口无横向溢出', result.layout.overflow === 0 && result.layout.overCount === 0,
+        'clientWidth=' + result.layout.clientWidth + ' / scrollWidth=' + result.layout.scrollWidth +
+        ' / 溢出 ' + result.layout.overflow + 'px / 越界元素 ' + result.layout.overCount + ' 个');
+
+      var f = result.fit;
+      var stemOK = f.stemMatchesBank && !f.stem.clipped && !f.stem.ellipsis && !f.stem.hidden;
+      var optOK = !!f.option && f.optionMatchesBank && !f.option.clipped && !f.option.ellipsis &&
+                  !f.option.hidden && !f.option.button.clipped;
+      T('T11', '长题干 / 长选项可完整阅读（不截断、不省略号、文字与题库一致）', stemOK && optOK,
+        '最长题干 ' + f.stemQuestion + '（' + f.stemLen + ' 字）；最长选项 ' + f.optionId +
+        '（' + f.optionLen + ' 字）；题干完整=' + f.stemMatchesBank + '，选项完整=' + f.optionMatchesBank);
+
+      result.done = true;
+    } catch (e) {
+      result.error = String(e && e.message || e);
+      result.done = true;
+    }
+    emit();
+  }
+
+  main();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# ---- 本地预览服务日志（不是产品文件，D031 要求排除）----
+tools/_preview_*.log
+
+# ---- 验收证据（跑测试时本地生成，代码在 tests/，证据不入库）----
+tests/_输出/
+
+# ---- 编辑器 / 系统垃圾 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+*~
+*.swp
+
+# ---- 备份与临时文件 ----
+*.bak
+*.bak_*
+*.tmp
+
+# ---- 依赖（本项目为纯静态站，正常不会有，防御性忽略）----
+node_modules/
+package-lock.json

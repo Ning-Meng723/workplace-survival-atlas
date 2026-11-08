@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>W05 视觉预览（固定视口）</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #E9E5DF; }
+  /* 固定视口壳：iframe 宽度即手机视口宽度；scrolling=no 让内容自己滚动，不占宽 */
+  #frame { display: block; border: 0; background: #FBF7F1; }
+</style>
+</head>
+<body>
+<!-- 用法：?w=390&h=844&scroll=1（scroll=1 时高度按内容撑开，用于整页长截图） -->
+<iframe id="frame" src="../index.html" scrolling="no"></iframe>
+<script>
+(function () {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = p[1];
+  });
+  var w = parseInt(q.w || '390', 10);
+  var h = parseInt(q.h || '844', 10);
+  var fr = document.getElementById('frame');
+  fr.style.width = w + 'px';
+  fr.style.height = h + 'px';
+  document.documentElement.style.width = w + 'px';
+  document.body.style.width = w + 'px';
+})();
+</script>
+</body>
+</html>

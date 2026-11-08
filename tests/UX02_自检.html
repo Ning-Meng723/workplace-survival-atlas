@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>UX02 跳过题目 · 自检</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #FBF7F1; }
+  #frame { display: block; border: 0; width: 390px; height: 844px; }
+  #out { position: absolute; left: -9999px; top: 0; }
+</style>
+</head>
+<body>
+<!-- 用法：?w=390&mode=full|layout —— 全部在真实浏览器里跑，iframe 同源加载 ../index.html -->
+<iframe id="frame" scrolling="no"></iframe>
+<pre id="out">PENDING</pre>
+<script>
+(function () {
+  'use strict';
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var MODE = q.mode || 'full';
+  var W = parseInt(q.w || '390', 10);
+
+  var fr = document.getElementById('frame');
+  fr.style.width = W + 'px';
+  fr.style.height = (MODE === 'full' ? 844 : 800) + 'px';
+
+  var win = null, doc = null, Q = null, R = null, S = null, bank = null, qs = null;
+  var result = { mode: MODE, width: W, stage: '', tests: [], layout: null, external: [], refs: [], error: null };
+
+  function T(id, name, ok, detail) { result.tests.push({ id: id, name: name, ok: !!ok, detail: String(detail == null ? '' : detail) }); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label, tries) {
+    return new Promise(function (res, rej) {
+      var n = 0, max = tries || 220;
+      (function tick() {
+        var v = false;
+        try { v = !!pred(); } catch (e) { v = false; }
+        if (v) return res(true);
+        if (++n > max) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 40);
+      })();
+    });
+  }
+  function $(id) { return doc.getElementById(id); }
+  function click(el) {
+    if (!el) return false;
+    var r = el.getBoundingClientRect();
+    var opt = { bubbles: true, cancelable: true, view: win, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+    el.dispatchEvent(new win.MouseEvent('mousedown', opt));
+    el.dispatchEvent(new win.MouseEvent('mouseup', opt));
+    el.dispatchEvent(new win.MouseEvent('click', opt));
+    return true;
+  }
+  function opts() { return [].slice.call(doc.querySelectorAll('#quiz-options .opt')); }
+  function findQ(id) { for (var i = 0; i < qs.length; i++) if (qs[i].id === id) return qs[i]; return null; }
+  function cellOf(oid) {
+    var a = opts();
+    for (var i = 0; i < a.length; i++) if (a[i].getAttribute('data-option-id') === oid) return a[i];
+    return null;
+  }
+  function scoreOpt(qid, score) {
+    var qq = findQ(qid), i;
+    for (i = 0; i < qq.options.length; i++) if (qq.options[i].score === score) return qq.options[i].option_id;
+    return qq.options[0].option_id;
+  }
+  function screen() { return doc.body.getAttribute('data-screen'); }
+  function storeRaw() {
+    try { return JSON.parse(win.localStorage.getItem('atlas.quiz.v1') || 'null') || {}; } catch (e) { return {}; }
+  }
+
+  /** 真实触摸手势（Chromium 支持 Touch / TouchEvent 构造） */
+  function gesture(el, dx, dy) {
+    var TouchC = win.Touch, TEC = win.TouchEvent;
+    if (!TouchC || !TEC) return { ok: false, reason: '浏览器不支持 Touch 构造' };
+    var x0 = 200, y0 = 420;
+    function ev(type, x, y, withTouches) {
+      var t = new TouchC({ identifier: 1, target: el, clientX: x, clientY: y, pageX: x, pageY: y });
+      return new TEC(type, {
+        bubbles: true, cancelable: true,
+        touches: withTouches ? [t] : [], targetTouches: withTouches ? [t] : [], changedTouches: [t]
+      });
+    }
+    el.dispatchEvent(ev('touchstart', x0, y0, true));
+    var m1 = ev('touchmove', x0 + dx * 0.4, y0 + dy * 0.4, true);
+    el.dispatchEvent(m1);
+    var m2 = ev('touchmove', x0 + dx, y0 + dy, true);
+    el.dispatchEvent(m2);
+    el.dispatchEvent(ev('touchend', x0 + dx, y0 + dy, false));
+    return { ok: true, prevented: !!(m1.defaultPrevented || m2.defaultPrevented) };
+  }
+
+  async function loadFrame(bust) {
+    try { localStorage.clear(); } catch (e) {}
+    await new Promise(function (res) {
+      fr.addEventListener('load', res, { once: true });
+      fr.src = '../index.html?ux02=' + (bust || Math.random().toString(36).slice(2));
+    });
+    win = fr.contentWindow; doc = fr.contentDocument;
+    await waitFor(function () { return !!win.__ATLAS_QUIZ__ && !!win.__ATLAS_RESULT__ && !!win.WorkplaceScoring && !!win.WorkplaceResult; }, '产品脚本就绪');
+    Q = win.__ATLAS_QUIZ__; R = win.__ATLAS_RESULT__; S = win.WorkplaceScoring;
+    result.stage = Q.version;
+  }
+  async function startQuiz() {
+    click($('btn-start'));
+    await waitFor(function () { return Q.isReady(); }, '题库加载完成');
+    bank = Q.bank(); qs = bank.questions;
+    await sleep(80);
+  }
+  /** 按计划铺满 20 题：plan(i, q) 返回 'skip' 或 1–4 分 */
+  async function lay(plan) {
+    for (var i = 0; i < qs.length; i++) {
+      Q.goTo(i);
+      var v = plan(i, qs[i]);
+      if (v === 'skip') Q.skip(false);
+      else Q.select(scoreOpt(qs[i].id, v));
+    }
+    await sleep(60);
+  }
+
+  function measureLayout() {
+    var de = doc.documentElement;
+    var over = [], all = doc.querySelectorAll('body *');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i], r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      if (r.right <= de.clientWidth + 0.5) continue;
+      var pr = el.parentElement ? el.parentElement.getBoundingClientRect() : null;
+      if (pr && pr.right > de.clientWidth + 0.5) continue;
+      over.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + ' right=' + r.right.toFixed(1));
+    }
+    var geo = {};
+    [['题干', '#quiz-stem'], ['选项组', '#quiz-options'], ['跳过按钮', '#btn-skip'],
+     ['拦截面板', '#quiz-block'], ['提示', '#quiz-tip'], ['底部条', '#actionbar-quiz']
+    ].forEach(function (p) {
+      var e = doc.querySelector(p[1]);
+      if (!e || e.hasAttribute('hidden')) return;
+      var r = e.getBoundingClientRect();
+      geo[p[0]] = { left: +r.left.toFixed(1), right: +r.right.toFixed(1), h: +r.height.toFixed(1) };
+    });
+    return {
+      clientWidth: de.clientWidth, scrollWidth: de.scrollWidth,
+      overflow: Math.max(0, de.scrollWidth - de.clientWidth),
+      over: over.slice(0, 8), overCount: over.length, geo: geo
+    };
+  }
+  function measureExternal() {
+    var entries = [];
+    try { entries = win.performance.getEntriesByType('resource').map(function (e) { return e.name; }); } catch (e) {}
+    var ext = entries.filter(function (u) { return u.indexOf(location.origin) !== 0 && !/^data:|^blob:/.test(u); });
+    var refs = [];
+    doc.querySelectorAll('[src], [href]').forEach(function (el) {
+      var v = el.getAttribute('src') || el.getAttribute('href') || '';
+      if (/^(https?:)?\/\//i.test(v)) refs.push(el.tagName.toLowerCase() + ' → ' + v);
+    });
+    return { entries: entries, external: ext, refs: refs };
+  }
+
+  // ================= 功能项 =================
+  async function runFull() {
+    await loadFrame();
+    await startQuiz();
+
+    // ---------- V1 跳过入口存在 ----------
+    Q.goTo(0);
+    await sleep(60);
+    var skipBtn = $('btn-skip');
+    var sbRect = skipBtn ? skipBtn.getBoundingClientRect() : { width: 0, height: 0 };
+    var optRect = opts()[3].getBoundingClientRect();
+    T('V1', '每题四个选项下方有「跳过本题，暂不回答」入口（可点、可点面积够）',
+      !!skipBtn && !skipBtn.hasAttribute('hidden') && skipBtn.textContent.indexOf('跳过本题') >= 0 &&
+      sbRect.height >= 42 && sbRect.width >= 260 && sbRect.top >= optRect.bottom - 1,
+      '按钮高 ' + sbRect.height.toFixed(0) + 'px / 宽 ' + sbRect.width.toFixed(0) +
+      'px / 在第 4 个选项下方=' + (sbRect.top >= optRect.bottom - 1) + ' / 文案「' + skipBtn.textContent.trim() + '」');
+
+    // ---------- V2 点跳过 → 记录 skipped → 自动下一题，且不产生 option_id ----------
+    click(skipBtn);
+    var snapNow = Q.snapshot();
+    var justSkipped = snapNow.skippedMap[qs[0].id] === true;
+    var noOid = !snapNow.answers[qs[0].id];
+    var idxRightAfter = snapNow.index;
+    await sleep(620);
+    var idxAfterSkip = Q.snapshot().index;
+    var st = storeRaw();
+    T('V2', '点「跳过」后立即记录 status=skipped，约 360ms 后自动进入下一题，且不产生任何 option_id',
+      justSkipped && noOid && idxRightAfter === 0 && idxAfterSkip === 1 &&
+      st.skipped && st.skipped[qs[0].id] === true && !(st.answers || {})[qs[0].id],
+      '跳过记录=' + justSkipped + ' / 该题无 option_id=' + noOid + ' / 即时 index=' + idxRightAfter +
+      ' / 620ms 后 index=' + idxAfterSkip + ' / 存档 skipped=' + JSON.stringify(st.skipped || {}));
+
+    // ---------- V3 回退后仍显示「已跳过」状态 ----------
+    click($('btn-prev'));
+    await sleep(220);
+    var skipStateEl = $('skip-state');
+    var skipBtn2 = $('btn-skip');
+    var shownSkip = skipStateEl && !skipStateEl.hasAttribute('hidden');
+    var btnSkipped = skipBtn2.className.indexOf('is-skipped') >= 0;
+    var zeroSelected = doc.querySelectorAll('#quiz-options .opt.is-selected').length;
+    T('V3', '回到已跳过的题目：按钮变「已跳过」、提示出现、四个选项都没有选中',
+      Q.snapshot().index === 0 && shownSkip && btnSkipped && zeroSelected === 0,
+      'index=' + Q.snapshot().index + ' / 已跳过提示可见=' + shownSkip + ' / 按钮态=' + skipBtn2.className +
+      ' / 选中选项数=' + zeroSelected);
+
+    // ---------- V4 已跳过题改选选项 → 变成已回答 ----------
+    var o1 = scoreOpt(qs[0].id, 4);
+    click(cellOf(o1));
+    var s4 = Q.snapshot();
+    T('V4', '已跳过的题再选一个选项：改为已回答，跳过标记消失（两种状态互斥）',
+      s4.answers[qs[0].id] === o1 && !s4.skippedMap[qs[0].id] && s4.answered === 1 && s4.skipped === 0,
+      'answer=' + s4.answers[qs[0].id] + ' / skippedMap 该题=' + s4.skippedMap[qs[0].id] +
+      ' / answered=' + s4.answered + ' / skipped=' + s4.skipped);
+    await sleep(620);
+
+    // ---------- V5 已回答题再点跳过 → 变为已跳过，旧 option_id 清掉 ----------
+    Q.goTo(1);
+    var o2 = scoreOpt(qs[1].id, 3);
+    Q.select(o2);
+    click($('btn-skip'));
+    var s5 = Q.snapshot();
+    T('V5', '已回答的题再点「跳过」：改为已跳过，旧的 option_id 被清掉（不留半条记录）',
+      !s5.answers[qs[1].id] && s5.skippedMap[qs[1].id] === true && s5.answered === 1 && s5.skipped === 1,
+      'answer 该题=' + s5.answers[qs[1].id] + ' / skipped=True / answered=' + s5.answered + ' / skipped=' + s5.skipped);
+    await sleep(620);
+
+    // ---------- V6 没选也没跳过：不能自动切题、不能左滑绕过 ----------
+    Q.goTo(2);
+    await sleep(300);
+    var beforeSlide = Q.snapshot().index;
+    var g1 = gesture($('screen-quiz'), -90, 4);
+    await sleep(200);
+    var afterSlide = Q.snapshot().index;
+    var nxtRet = Q.next();
+    await sleep(120);
+    var afterNext = Q.snapshot().index;
+    T('V6', '既没选也没点跳过时：不会自动切题，左滑与「下一题」都绕不过去',
+      beforeSlide === 2 && afterSlide === 2 && nxtRet === false && afterNext === 2 &&
+      !Q.snapshot().answers[qs[2].id] && !Q.snapshot().skippedMap[qs[2].id],
+      '左滑前 index=' + beforeSlide + ' / 左滑后=' + afterSlide + ' / next() 返回=' + nxtRet +
+      ' / 再查 index=' + afterNext + '（横向手势已拦截滚动=' + (g1 && g1.prevented) + '）');
+
+    // ---------- V7 进度按「已处理」计（答 + 跳过） ----------
+    var label = $('quiz-progress-label').textContent;
+    var progNow = parseInt($('quiz-progress').getAttribute('aria-valuenow'), 10);
+    T('V7', '进度条与「已完成 X / 20」按已回答 + 已跳过合计（跳过的题不会被算成未完成）',
+      progNow === 2 && /已完成 2 \/ 20/.test(label) && /跳过 1/.test(label),
+      'aria-valuenow=' + progNow + ' / 文案「' + label + '」');
+
+    // ---------- V8 某维只剩 1 题有效回答 → 拦在答题页，给可点入口 ----------
+    //   W 维 = Q01..Q04：Q01 作答，Q02/Q03/Q04 全部跳过 → 20 个位置都「处理过」，但 W 只有 1 题有效
+    Q.reset();
+    await sleep(200);
+    Q.goTo(0); Q.select(scoreOpt(qs[0].id, 4));
+    Q.goTo(1); Q.skip(false);
+    Q.goTo(2); Q.skip(false);
+    Q.goTo(3); Q.skip(false);
+    for (var i = 4; i < qs.length; i++) { Q.goTo(i); Q.select(scoreOpt(qs[i].id, 3)); }
+    var beforeBlock = JSON.stringify(Q.snapshot().answers);
+    Q.goTo(qs.length - 1);
+    await sleep(120);
+    var r8 = Q.tryComplete();
+    await sleep(150);
+    var blockEl = $('quiz-block');
+    var blockShown = blockEl && !blockEl.hasAttribute('hidden');
+    var bodyTxt = ($('quiz-block-body') || {}).textContent || '';
+    var btnTxt = ($('btn-block-goto') || {}).textContent || '';
+    var stillQuiz = screen() === 'quiz';
+    var noAutoFix = JSON.stringify(Q.snapshot().answers) === beforeBlock;   // 没有替用户补答案
+    T('V8', '一维只有 1 题有效回答：拒绝出结果、留在答题页，并给出可点的补答入口（不自动补答案）',
+      r8 && r8.ok === false && blockShown && stillQuiz && noAutoFix &&
+      bodyTxt.indexOf('钱包回血指数') >= 0 && bodyTxt.indexOf('至少需要 2 题') >= 0 &&
+      /去补答第 0[1-4] 题/.test(btnTxt),
+      'tryComplete()=' + JSON.stringify(r8) + ' / 面板可见=' + blockShown + ' / 停留答题页=' + stillQuiz +
+      ' / 答案未被自动改动=' + noAutoFix + ' / 面板文案「' + bodyTxt + '」 / 按钮「' + btnTxt + '」');
+
+    // ---------- V9 点「去补答」跳到该维的缺答题 ----------
+    var targetIdx = Q.snapshot().index;
+    click($('btn-block-goto'));
+    await sleep(220);
+    var jumped = Q.snapshot().index;
+    var jumpedQ = qs[jumped];
+    T('V9', '点「去补答第 XX 题」直接跳到该维度缺少的那道题',
+      jumped !== targetIdx && jumpedQ.dim === 'W' && !Q.snapshot().answers[jumpedQ.id],
+      '点前 index=' + targetIdx + ' / 点后 index=' + jumped + '（' + jumpedQ.id + '，维度 ' + jumpedQ.dim + '）');
+
+    // ---------- V10 补到 2 题 → 能出结果；结果页出现跳过说明 + 各维 X/4 ----------
+    Q.select(scoreOpt(jumpedQ.id, 2));
+    Q.goTo(qs.length - 1);
+    await sleep(120);
+    var r10 = Q.tryComplete();
+    await waitFor(function () { return screen() === 'result'; }, '结果页');
+    var noteEl = $('result-skip-note');
+    var noteShown = noteEl && !noteEl.hasAttribute('hidden');
+    var noteCount = ($('result-skip-count') || {}).textContent;
+    var res = R.result();
+    var counts = res.answerCount || {};
+    var rows = [].slice.call(doc.querySelectorAll('#result-dims .dim-row'));
+    var countTexts = rows.map(function (li) { return li.getAttribute('data-dim') + ':' + (li.querySelector('.dim-count') || {}).textContent; });
+    T('V10', '补到 2 题即可出结果；结果页显示「本次跳过了 X 道题」+ 各维实际回答数 X/4',
+      r10.ok && noteShown && String(noteCount) === String(res.totalSkipped) &&
+      res.totalSkipped === 2 && noteEl.textContent.indexOf('相关维度根据已回答的题目计算') >= 0 &&
+      noteEl.textContent.indexOf('结果仅供娱乐参考') >= 0 &&
+      countTexts.length === 5 && countTexts.indexOf('W:1/4 题') < 0,
+      '跳过 ' + res.totalSkipped + ' 题（说明里写 ' + noteCount + '）/ 各维 ' + countTexts.join(' ') +
+      ' / 面板文案「' + noteEl.textContent.replace(/\s+/g, ' ').trim() + '」');
+
+    // ---------- V11 分享卡内容不受影响（仍 1080×1440、无数字、≤2 行） ----------
+    click($('btn-make-card'));
+    await waitFor(function () { return R.modalOpen() && !!R.card(); }, '分享卡');
+    var card = R.card();
+    var cardOk = card.ok && card.width === 1080 && card.height === 1440 &&
+                 card.lineCount <= 2 && !/\d+\.\d/.test(card.text || '') &&
+                 card.text.indexOf('跳过') < 0;
+    T('V11', '部分作答时分享卡仍是 1080×1440、台词 ≤2 行、卡上不出现分数与跳过说明',
+      cardOk,
+      card.width + '×' + card.height + ' / ' + Math.round(card.bytes / 1024) + ' KB / 台词行数=' + card.lineCount +
+      ' / 卡上文字含跳过=' + (card.text.indexOf('跳过') >= 0));
+    click($('card-close'));
+    await sleep(160);
+
+    // ---------- V12 全答时结果页不显示跳过说明（回归 v1.1 外观） ----------
+    click($('btn-result-restart'));
+    await sleep(300);
+    await lay(function () { return 3; });
+    Q.goTo(qs.length - 1);
+    await sleep(120);
+    var r12 = Q.tryComplete();
+    await waitFor(function () { return screen() === 'result'; }, '全答结果页');
+    var note12 = $('result-skip-note');
+    var countCells = doc.querySelectorAll('#result-dims .dim-count').length;
+    var hasCountClass = $('result-dims').className.indexOf('has-count') >= 0;
+    T('V12', '20 题全答时：不显示跳过说明、不出现 X/4 标记（与 v1.1 版式一致）',
+      r12.ok && note12.hasAttribute('hidden') && countCells === 0 && !hasCountClass,
+      '说明隐藏=' + note12.hasAttribute('hidden') + ' / X/4 元素数=' + countCells + ' / has-count 类=' + hasCountClass);
+
+    // ---------- V13 全答结果与直接调用计分一致（原结果没被改动） ----------
+    var resAll = R.result();
+    var direct = S.scoreBank(bank, Q.snapshot().answers, Q.snapshot().skippedMap);
+    var rows2 = [].slice.call(doc.querySelectorAll('#result-dims .dim-row')).map(function (li) {
+      return li.getAttribute('data-dim') + '=' + li.getAttribute('data-value');
+    });
+    var expect2 = ['W', 'L', 'M', 'C', 'G'].map(function (d) { return d + '=' + Number(resAll.dims[d]).toFixed(1); });
+    var gridOk = ['W', 'L', 'M', 'C', 'G'].every(function (d) {
+      var v = resAll.dims[d];
+      return Math.abs(Math.round(v / 100 * 12) * 100 / 12 - v) < 1e-9;
+    });
+    T('V13', '全答结果与直接调用计分一致，五维仍落在 13 档格点上（原算法未被动到）',
+      JSON.stringify(resAll) === JSON.stringify(direct) && rows2.join('|') === expect2.join('|') && gridOk,
+      '结果对象一致=' + (JSON.stringify(resAll) === JSON.stringify(direct)) + ' / ' + rows2.join(' '));
+
+    // ---------- V14 刷新后跳过状态保留（localStorage） ----------
+    click($('btn-result-restart'));
+    await sleep(280);
+    Q.goTo(0); Q.select(scoreOpt(qs[0].id, 4));
+    Q.goTo(1); Q.skip(false);
+    Q.goTo(2); Q.skip(false);
+    await sleep(80);
+    var beforeReload = Q.snapshot();
+    await new Promise(function (res) {
+      fr.addEventListener('load', res, { once: true });
+      fr.src = '../index.html?ux02reload=' + Math.random().toString(36).slice(2);
+    });
+    win = fr.contentWindow; doc = fr.contentDocument;
+    await waitFor(function () { return !!win.__ATLAS_QUIZ__; }, '重载后脚本就绪');
+    Q = win.__ATLAS_QUIZ__; R = win.__ATLAS_RESULT__; S = win.WorkplaceScoring;
+    click($('btn-start'));
+    await waitFor(function () { return Q.isReady(); }, '重载后题库就绪');
+    bank = Q.bank(); qs = bank.questions;
+    await sleep(200);
+    var afterReload = Q.snapshot();
+    T('V14', '刷新页面后：已回答与已跳过都还在（答案只存本机，刷新不丢）',
+      afterReload.answers[qs[0].id] === beforeReload.answers[qs[0].id] &&
+      afterReload.skippedMap[qs[1].id] === true && afterReload.skippedMap[qs[2].id] === true &&
+      afterReload.answered === 1 && afterReload.skipped === 2,
+      '重载后 answered=' + afterReload.answered + ' / skipped=' + afterReload.skipped +
+      ' / Q01=' + afterReload.answers[qs[0].id] + ' / 跳过=' + JSON.stringify(afterReload.skippedMap));
+
+    var ex = measureExternal();
+    result.external = ex.external; result.refs = ex.refs;
+  }
+
+  async function runLayout() {
+    await loadFrame();
+    await startQuiz();
+    Q.goTo(0);
+    await sleep(80);
+    result.layout = measureLayout();
+
+    // 拦截面板可见时的布局（最容易溢出的那个状态）
+    Q.goTo(0); Q.select(scoreOpt(qs[0].id, 4));
+    Q.goTo(1); Q.skip(false);
+    Q.goTo(2); Q.skip(false);
+    Q.goTo(3); Q.skip(false);
+    for (var i = 4; i < qs.length; i++) { Q.goTo(i); Q.select(scoreOpt(qs[i].id, 3)); }
+    Q.goTo(qs.length - 1);
+    await sleep(120);
+    Q.tryComplete();
+    await sleep(200);
+    result.layoutBlock = measureLayout();
+
+    // 部分作答的结果页（多了跳过说明与 X/4 列）：给 W 维补 1 题 → n=2
+    Q.goTo(1);
+    Q.select(scoreOpt(qs[1].id, 2));
+    Q.goTo(qs.length - 1);
+    await sleep(120);
+    Q.tryComplete();
+    await waitFor(function () { return doc.body.getAttribute('data-screen') === 'result'; }, '结果页');
+    await sleep(120);
+    result.layoutResult = measureLayout();
+
+    var note = $('result-skip-note');
+    var noteRect = note && !note.hasAttribute('hidden') ? note.getBoundingClientRect() : null;
+    result.noteOk = !noteRect || (noteRect.left >= -0.5 && noteRect.right <= doc.documentElement.clientWidth + 0.5);
+    var ex = measureExternal();
+    result.external = ex.external; result.refs = ex.refs;
+  }
+
+  function done() {
+    document.getElementById('out').textContent = btoa(unescape(encodeURIComponent(JSON.stringify(result))));
+  }
+
+  (async function main() {
+    try {
+      if (MODE === 'full') await runFull();
+      else await runLayout();
+      if (!result.layout) { try { result.layout = measureLayout(); } catch (e) {} }
+    } catch (e) {
+      result.error = String(e && e.message || e);
+      try { result.layout = result.layout || measureLayout(); } catch (e2) {}
+    }
+    done();
+  })();
+})();
+</script>
+</body>
+</html>

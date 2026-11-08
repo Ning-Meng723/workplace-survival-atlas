@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>W07 结果页视觉快照（固定视口）</title>
+<style>
+  /* 固定视口壳：iframe 宽度即手机视口宽度，避免截图工具多算 20px 造成「被裁掉」错觉 */
+  html, body { margin: 0; padding: 0; background: #FBF7F1; }
+  #frame { display: block; border: 0; background: #FBF7F1; }
+</style>
+</head>
+<body>
+<!-- 用法：?w=390&h=844&state=result|card&sp=树懒|炸毛猫|水豚|狐狸|企鹅 -->
+<iframe id="frame" scrolling="no"></iframe>
+<script>
+(function () {
+  'use strict';
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = decodeURIComponent(p[1] || '');
+  });
+  var w = parseInt(q.w || '390', 10), h = parseInt(q.h || '844', 10);
+  var state = q.state || 'result', sp = q.sp || '';
+  var fr = document.getElementById('frame');
+  fr.style.width = w + 'px'; fr.style.height = h + 'px';
+  document.documentElement.style.width = w + 'px';
+  document.body.style.width = w + 'px';
+
+  // 5 个物种各一组真实五维指数（来自 13^5 穷举代表），交给 scoring.js 生成真实结果对象
+  var PRESET = {
+    '树懒':   {W:0,L:0,M:0,C:0,G:0},
+    '炸毛猫': {W:0,L:8.3333333333,M:0,C:0,G:0},
+    '水豚':   {W:41.6666666667,L:58.3333333333,M:66.6666666667,C:66.6666666667,G:66.6666666667},
+    '狐狸':   {W:41.6666666667,L:33.3333333333,M:100,C:100,G:100},
+    '企鹅':   {W:0,L:75,M:100,C:100,G:100}
+  };
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function waitFor(pred, label, tries) {
+    return new Promise(function (res, rej) {
+      var n = 0, max = tries || 160;
+      (function tick() {
+        if (pred()) return res(true);
+        if (++n > max) return rej(new Error('等待超时：' + label));
+        setTimeout(tick, 50);
+      })();
+    });
+  }
+  try { localStorage.clear(); } catch (e) {}
+
+  fr.addEventListener('load', function () {
+    (async function () {
+      try {
+        var win = fr.contentWindow, d = fr.contentDocument;
+        await waitFor(function () { return !!win.__ATLAS_QUIZ__ && !!win.__ATLAS_RESULT__ && !!win.WorkplaceScoring; }, '脚本就绪');
+        var Q = win.__ATLAS_QUIZ__, R = win.__ATLAS_RESULT__, S = win.WorkplaceScoring;
+
+        if (sp && PRESET[sp]) {
+          // 指定物种：先加载文案，再用真实算法结果渲染
+          R.loadCopy(function (ok) {
+            if (!ok) { document.title = 'ERROR ' + (R.snapshot() ? '文案加载失败' : ''); return; }
+            // loadCopy 回调执行时 copy 已就绪；题库此时可能还没读，用 XHR 同步读一份
+            var xhr = new win.XMLHttpRequest();
+            xhr.open('GET', 'data/题库.json', false);
+            xhr.send();
+            var bank = JSON.parse(xhr.responseText);
+            var obj = S.classifyIndices(PRESET[sp], S.versionsFromBank(bank));
+            R.renderWith(obj);
+            document.title = 'READY ' + sp;
+          });
+        } else {
+          // 真实点击：入口 → 20 题 → 结果页（UX01：无独立完成页）
+          d.getElementById('btn-start').click();
+          await waitFor(function () { return Q.isReady(); }, '题库');
+          await sleep(120);
+          var qs = Q.bank().questions;
+          for (var i = 0; i < qs.length; i++) { Q.goTo(i); Q.select(qs[i].options[1].option_id); }
+          Q.tryComplete();
+          await waitFor(function () {
+            return d.body.getAttribute('data-screen') === 'result' && R.snapshot().resultPresent;
+          }, '结果页');
+          if (state === 'card') {
+            d.getElementById('btn-make-card').click();
+            await waitFor(function () { return R.modalOpen() && !!R.card(); }, '分享卡弹窗');
+          }
+          document.title = 'READY ' + state;
+        }
+      } catch (e) {
+        document.title = 'ERROR ' + String(e.message || e);
+      }
+    })();
+  }, { once: true });
+
+  fr.src = '../index.html?shot=' + Math.random().toString(36).slice(2);
+})();
+</script>
+</body>
+</html>

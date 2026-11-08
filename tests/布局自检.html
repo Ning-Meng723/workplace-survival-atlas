@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>W05 布局自检</title>
+<style>body{font:13px/1.6 monospace;margin:0;padding:12px} iframe{border:1px solid #ccc;display:block} pre{white-space:pre-wrap}</style>
+</head>
+<body>
+<!-- 用法：?w=390 指定视口宽度；需带 --allow-file-access-from-files 才能读 iframe 内部 -->
+<pre id="out">测量中…</pre>
+<iframe id="fr" src="../index.html" width="390" height="844"></iframe>
+<script>
+(function () {
+  var q = {};
+  location.search.replace(/^\?/, '').split('&').forEach(function (kv) {
+    var p = kv.split('='); if (p[0]) q[p[0]] = p[1];
+  });
+  var W = parseInt(q.w || '390', 10);
+  var H = parseInt(q.h || '844', 10);
+  var fr = document.getElementById('fr');
+  fr.width = W; fr.height = H;
+
+  var lines = [];
+  function log(s) { lines.push(s); }
+
+  fr.onload = function () {
+    setTimeout(function () {
+      try {
+        var d = fr.contentDocument, win = fr.contentWindow;
+        var de = d.documentElement, bd = d.body;
+        log('视口宽度 ' + W + ' × ' + H);
+        log('documentElement scrollWidth ' + de.scrollWidth + ' / clientWidth ' + de.clientWidth);
+        log('body scrollWidth ' + bd.scrollWidth + ' / clientWidth ' + bd.clientWidth);
+        log('横向溢出 ' + (de.scrollWidth > de.clientWidth ? '有（' + (de.scrollWidth - de.clientWidth) + 'px）' : '无'));
+
+        // 找出右边界超出视口的元素（只报最外层：父元素没超的才算起点）
+        var all = d.querySelectorAll('body *');
+        var over = [], seen = [];
+        for (var i = 0; i < all.length; i++) {
+          var el = all[i];
+          var r = el.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) continue;
+          if (r.right <= de.clientWidth + 0.5) continue;
+          var pr = el.parentElement ? el.parentElement.getBoundingClientRect() : null;
+          if (pr && pr.right > de.clientWidth + 0.5) continue; // 父元素也超了，由父元素代表
+          over.push(el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).join('.') : '') + ' right=' + r.right.toFixed(1) + ' w=' + r.width.toFixed(1));
+        }
+        log('右边界超出的元素 ' + over.length + ' 个' + (over.length ? '：' : ''));
+        over.slice(0, 8).forEach(function (s) { log('  - ' + s); });
+
+        // 关键元素几何
+        var items = [
+          ['h1', d.querySelector('h1')],
+          ['首屏 .hero', d.querySelector('.hero')],
+          ['正文 .prose', d.querySelector('.prose')],
+          ['声明 .notice', d.querySelector('.notice')],
+          ['物种条 .species-strip', d.querySelector('.species-strip')],
+          ['开始按钮', d.querySelector('#btn-start')],
+          ['底部提示 #btn-hint', d.querySelector('#btn-hint')]
+        ];
+        log('\n关键元素（left / right / width / height）：');
+        items.forEach(function (it) {
+          var el = it[1];
+          if (!el) { log('  ' + it[0] + ' 缺失'); return; }
+          var r = el.getBoundingClientRect();
+          log('  ' + it[0] + '  L' + r.left.toFixed(1) + ' R' + r.right.toFixed(1) + ' W' + r.width.toFixed(1) + ' H' + r.height.toFixed(1));
+        });
+
+        // 按钮点击区域
+        var btn = d.querySelector('#btn-start');
+        if (btn) {
+          var br = btn.getBoundingClientRect();
+          log('\n按钮点击区域 ' + br.width.toFixed(0) + ' × ' + br.height.toFixed(0) + '（要求 ≥ 44 × 44）→ ' + (br.height >= 44 && br.width >= 44 ? '合格' : '不合格'));
+        }
+
+        // 字号
+        var h1 = d.querySelector('h1');
+        if (h1) log('h1 字号 ' + win.getComputedStyle(h1).fontSize);
+
+        // 字体是否回退到系统字体（不允许网络字体）
+        log('\n外部资源请求：');
+        var res = win.performance.getEntriesByType('resource');
+        var ext = res.filter(function (r) { return /^https?:/.test(r.name); });
+        log('  总请求 ' + res.length + ' 个，其中 http(s) 外部请求 ' + ext.length + ' 个' + (ext.length ? '：' + ext.map(function (r) { return r.name; }).join(' , ') : '（零外链）'));
+
+        // 资源自检
+        log('\n占位图自检 data-assets=' + bd.getAttribute('data-assets') + ' data-asset-count=' + bd.getAttribute('data-asset-count'));
+
+        // 屏幕骨架
+        var screens = ['screen-entry', 'screen-quiz', 'screen-result'];
+        log('\n屏幕骨架：');
+        screens.forEach(function (id) {
+          var el = d.getElementById(id);
+          if (!el) { log('  ' + id + ' 缺失'); return; }
+          log('  ' + id + ' ' + (el.hasAttribute('hidden') ? '隐藏' : '可见') + ' data-stage=' + (el.getAttribute('data-stage') || '—'));
+        });
+
+        // 点击「开始测试」后的行为
+        if (btn) {
+          btn.click();
+          log('\n点击开始测试 → 提示文案：「' + d.getElementById('btn-hint').textContent.trim() + '」');
+          log('  当前可见屏幕 ' + (d.getElementById('screen-entry').hasAttribute('hidden') ? '非 entry' : 'entry（未跳转，符合 W05 预期）'));
+        }
+
+        log('\n结论：' + (de.scrollWidth > de.clientWidth ? '存在横向溢出，需修' : '无横向溢出'));
+        document.getElementById('out').textContent = lines.join('\n');
+      } catch (e) {
+        document.getElementById('out').textContent = 'ERROR: ' + e.message + '\n（需带 --allow-file-access-from-files 运行）';
+      }
+    }, 600);
+  };
+})();
+</script>
+</body>
+</html>
